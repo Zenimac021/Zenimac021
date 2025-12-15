@@ -217,7 +217,7 @@ int OnCalculate(const int rates_total,
                 const int &spread[])
 {
    //--- Check for minimum bars
-   int minBars = MathMax(SlowEMA_Period, MathMax(MACD_Slow + MACD_Signal, ADX_Period)) + 10;
+   int minBars = MathMax(MathMax(SlowEMA_Period, MACD_Slow + MACD_Signal), MathMax(ADX_Period, ATR_Period)) + 10;
    if(rates_total < minBars)
       return(0);
    
