@@ -5,10 +5,10 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, Zenimac021"
 #property link      "https://github.com/Zenimac021/Zenimac021"
-#property version   "1.00"
+#property version   "1.01"
 #property description "Professional Gold (XAUUSD) Trend Scalping Signal Indicator"
 #property description "Uses EMA Crossover + MACD + ADX for trend confirmation"
-#property description "Includes session filters, spread filter, and SL/TP levels"
+#property description "Includes auto session detection, spread filter, and SL/TP levels"
 #property indicator_chart_window
 #property indicator_buffers 4
 #property indicator_plots   2
@@ -32,6 +32,16 @@ enum ENUM_SLTP_MODE
 {
    MODE_FIXED = 0,    // Fixed Points
    MODE_ATR   = 1     // ATR-Based
+};
+
+enum MARKET_SESSION
+{
+   SESSION_ASIAN = 0,     // Asian Session
+   SESSION_LONDON = 1,    // London Session
+   SESSION_NEWYORK = 2,   // New York Session
+   SESSION_OVERLAP = 3,   // Session Overlap
+   SESSION_WEEKEND = 4,   // Weekend
+   SESSION_OFF = 5        // Off Hours
 };
 
 //+------------------------------------------------------------------+
@@ -65,14 +75,15 @@ input string             AlertSound        = "alert.wav"; // Alert Sound File
 //--- Session Filter Settings
 input group "=== Session Filter ==="
 input bool               EnableSessionFilter = true;      // Enable Session Filter
-input bool               TradeAsianSession   = false;     // Trade Asian Session (00:00-08:00)
+input bool               TradeAsianSession   = true;      // Trade Asian Session (00:00-08:00)
 input bool               TradeLondonSession  = true;      // Trade London Session (08:00-16:00)
 input bool               TradeNewYorkSession = true;      // Trade New York Session (13:00-21:00)
+input bool               TradeSessionOverlaps = true;     // Trade Session Overlaps
 
 //--- Spread Filter Settings
 input group "=== Spread Filter ==="
 input bool               EnableSpreadFilter = true;       // Enable Spread Filter
-input int                MaxSpreadPoints    = 30;         // Maximum Spread in Points
+input int                MaxSpreadPoints    = 200;        // Maximum Spread in Points
 
 //--- Risk Management Settings
 input group "=== Risk Management ==="
@@ -92,8 +103,8 @@ input int                ArrowSize         = 3;           // Arrow Size (1-5)
 input bool               ShowInfoPanel     = true;        // Show Information Panel
 input color              PanelBgColor      = clrBlack;    // Panel Background Color
 input color              PanelTextColor    = clrWhite;    // Panel Text Color
-input int                PanelXOffset      = 20;          // Panel X Position
-input int                PanelYOffset      = 30;          // Panel Y Position
+input int                PanelXOffset      = 5;           // Panel X Position
+input int                PanelYOffset      = 90;          // Panel Y Position
 
 //+------------------------------------------------------------------+
 //| Global Variables                                                  |
@@ -285,7 +296,8 @@ int OnCalculate(const int rates_total,
       bool adxStrong = adxValue[i] >= ADX_MinLevel;
       
       //--- Check filters
-      bool sessionOK = CheckSession(time[i]);
+      MARKET_SESSION currentSession = GetMarketSession(time[i]);
+      bool sessionOK = CheckSession(currentSession);
       bool spreadOK = CheckSpread();
       
       //--- Generate BUY signal
@@ -298,7 +310,7 @@ int OnCalculate(const int rates_total,
          {
             double slPrice, tpPrice;
             CalculateSLTP(close[i], true, atrValue[i], slPrice, tpPrice);
-            SendSignalAlert("BUY", close[i], slPrice, tpPrice, adxValue[i]);
+            SendSignalAlert("BUY", close[i], slPrice, tpPrice, adxValue[i], currentSession);
             
             if(ShowSLTP)
                DrawSLTPLines(slPrice, tpPrice, true);
@@ -317,7 +329,7 @@ int OnCalculate(const int rates_total,
          {
             double slPrice, tpPrice;
             CalculateSLTP(close[i], false, atrValue[i], slPrice, tpPrice);
-            SendSignalAlert("SELL", close[i], slPrice, tpPrice, adxValue[i]);
+            SendSignalAlert("SELL", close[i], slPrice, tpPrice, adxValue[i], currentSession);
             
             if(ShowSLTP)
                DrawSLTPLines(slPrice, tpPrice, false);
@@ -332,39 +344,86 @@ int OnCalculate(const int rates_total,
    {
       int lastIdx = rates_total - 1;
       string trend = (fastEMA[lastIdx] > slowEMA[lastIdx]) ? "BULLISH" : "BEARISH";
-      string session = GetCurrentSession();
+      MARKET_SESSION currentSession = GetMarketSession(TimeCurrent());
+      string sessionName = GetSessionName(currentSession);
       int currentSpread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-      UpdateInfoPanel(trend, adxValue[lastIdx], session, currentSpread, atrValue[lastIdx]);
+      UpdateInfoPanel(trend, adxValue[lastIdx], sessionName, currentSpread, atrValue[lastIdx], currentSession);
    }
    
    return(rates_total);
 }
 
 //+------------------------------------------------------------------+
+//| Get current market session                                        |
+//+------------------------------------------------------------------+
+MARKET_SESSION GetMarketSession(datetime barTime)
+{
+   MqlDateTime dt;
+   TimeToStruct(barTime, dt);
+   int hour = dt.hour;
+   int dayOfWeek = dt.day_of_week;
+   
+   //--- Weekend (Saturday and Sunday)
+   if(dayOfWeek == 0 || dayOfWeek == 6)
+      return SESSION_WEEKEND;
+   
+   //--- Asian Session: 00:00 - 08:00 GMT
+   if(hour >= 0 && hour < 8)
+      return SESSION_ASIAN;
+   
+   //--- London Session: 08:00 - 16:00 GMT
+   if(hour >= 8 && hour < 16)
+   {
+      //--- London/New York Overlap: 13:00 - 16:00 GMT
+      if(hour >= 13)
+         return SESSION_OVERLAP;
+      else
+         return SESSION_LONDON;
+   }
+   
+   //--- New York Session: 13:00 - 21:00 GMT
+   if(hour >= 13 && hour < 21)
+      return SESSION_NEWYORK;
+   
+   //--- Off Hours
+   return SESSION_OFF;
+}
+
+//+------------------------------------------------------------------+
+//| Get session name as string                                        |
+//+------------------------------------------------------------------+
+string GetSessionName(MARKET_SESSION session)
+{
+   switch(session)
+   {
+      case SESSION_ASIAN:   return "ASIAN";
+      case SESSION_LONDON:  return "LONDON";
+      case SESSION_NEWYORK: return "NEW YORK";
+      case SESSION_OVERLAP: return "LONDON/NY";
+      case SESSION_WEEKEND: return "WEEKEND";
+      case SESSION_OFF:     return "OFF-HOURS";
+      default:              return "UNKNOWN";
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Check if current time is within allowed trading session          |
 //+------------------------------------------------------------------+
-bool CheckSession(datetime barTime)
+bool CheckSession(MARKET_SESSION currentSession)
 {
    if(!EnableSessionFilter)
       return true;
    
-   MqlDateTime dt;
-   TimeToStruct(barTime, dt);
-   int hour = dt.hour;
-   
-   //--- Asian Session: 00:00 - 08:00 GMT
-   if(TradeAsianSession && hour >= 0 && hour < 8)
-      return true;
-   
-   //--- London Session: 08:00 - 16:00 GMT
-   if(TradeLondonSession && hour >= 8 && hour < 16)
-      return true;
-   
-   //--- New York Session: 13:00 - 21:00 GMT
-   if(TradeNewYorkSession && hour >= 13 && hour < 21)
-      return true;
-   
-   return false;
+   switch(currentSession)
+   {
+      case SESSION_ASIAN:   return TradeAsianSession;
+      case SESSION_LONDON:  return TradeLondonSession;
+      case SESSION_NEWYORK: return TradeNewYorkSession;
+      case SESSION_OVERLAP: return TradeSessionOverlaps;
+      case SESSION_WEEKEND: return false;  // Never trade on weekends
+      case SESSION_OFF:     return false;  // Never trade during off hours
+      default:              return false;
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -377,27 +436,6 @@ bool CheckSpread()
    
    int currentSpread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
    return (currentSpread <= MaxSpreadPoints);
-}
-
-//+------------------------------------------------------------------+
-//| Get current session name                                          |
-//+------------------------------------------------------------------+
-string GetCurrentSession()
-{
-   MqlDateTime dt;
-   TimeToStruct(TimeCurrent(), dt);
-   int hour = dt.hour;
-   
-   if(hour >= 13 && hour < 16)
-      return "LONDON/NY";
-   else if(hour >= 8 && hour < 16)
-      return "LONDON";
-   else if(hour >= 13 && hour < 21)
-      return "NEW YORK";
-   else if(hour >= 0 && hour < 8)
-      return "ASIAN";
-   else
-      return "OFF-HOURS";
 }
 
 //+------------------------------------------------------------------+
@@ -438,7 +476,7 @@ void CalculateSLTP(double entryPrice, bool isBuy, double atr, double &sl, double
 //+------------------------------------------------------------------+
 //| Send signal alerts                                                |
 //+------------------------------------------------------------------+
-void SendSignalAlert(string signalType, double price, double sl, double tp, double adx)
+void SendSignalAlert(string signalType, double price, double sl, double tp, double adx, MARKET_SESSION session)
 {
    //--- Prevent duplicate alerts
    datetime currentTime = TimeCurrent();
@@ -449,7 +487,7 @@ void SendSignalAlert(string signalType, double price, double sl, double tp, doub
    
    //--- Format alert message
    string message = StringFormat("%s %s Signal @ %.2f\nSL: %.2f | TP: %.2f\nADX: %.1f | Session: %s",
-                                 _Symbol, signalType, price, sl, tp, adx, GetCurrentSession());
+                                 _Symbol, signalType, price, sl, tp, adx, GetSessionName(session));
    
    //--- Sound Alert
    if(EnableSoundAlert)
@@ -485,8 +523,8 @@ void CreateInfoPanel()
 {
    int x = PanelXOffset;
    int y = PanelYOffset;
-   int width = 200;
-   int height = 180;
+   int width = 240;
+   int height = 190;
    
    //--- Create background rectangle
    ObjectCreate(0, PanelPrefix + "BG", OBJ_RECTANGLE_LABEL, 0, 0, 0);
@@ -503,7 +541,7 @@ void CreateInfoPanel()
    ObjectSetInteger(0, PanelPrefix + "BG", OBJPROP_SELECTABLE, false);
    
    //--- Create title label
-   CreateLabel(PanelPrefix + "Title", x + 10, y + 5, "GOLD TREND SCALPER v1.0", clrGold, 10, true);
+   CreateLabel(PanelPrefix + "Title", x + 10, y + 5, "GOLD TREND SCALPER v1.01", clrGold, 10, true);
    
    //--- Create separator line
    CreateLabel(PanelPrefix + "Sep1", x + 10, y + 25, "------------------------", clrGray, 8, false);
@@ -551,7 +589,7 @@ void CreateLabel(string name, int x, int y, string text, color clr, int fontSize
 //+------------------------------------------------------------------+
 //| Update information panel                                          |
 //+------------------------------------------------------------------+
-void UpdateInfoPanel(string trend, double adx, string session, int spread, double atr)
+void UpdateInfoPanel(string trend, double adx, string session, int spread, double atr, MARKET_SESSION currentSession)
 {
    //--- Update trend
    color trendColor = (trend == "BULLISH") ? clrLime : clrRed;
@@ -571,7 +609,7 @@ void UpdateInfoPanel(string trend, double adx, string session, int spread, doubl
    ObjectSetInteger(0, PanelPrefix + "ADXValue", OBJPROP_COLOR, adxColor);
    
    //--- Update session
-   bool sessionActive = CheckSession(TimeCurrent());
+   bool sessionActive = CheckSession(currentSession);
    color sessionColor = sessionActive ? clrLime : clrGray;
    string sessionStatus = sessionActive ? " (Active)" : " (Inactive)";
    ObjectSetString(0, PanelPrefix + "SessionValue", OBJPROP_TEXT, session + sessionStatus);
