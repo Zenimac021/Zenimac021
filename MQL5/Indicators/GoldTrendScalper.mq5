@@ -34,6 +34,11 @@ enum ENUM_SLTP_MODE
    MODE_ATR   = 1     // ATR-Based
 };
 
+//--- Constants
+#define ARROW_OFFSET_MULTIPLIER 0.5
+#define ALERT_COOLDOWN_SECONDS 60
+#define MIN_BARS_OFFSET 10
+
 //+------------------------------------------------------------------+
 //| Input Parameters                                                  |
 //+------------------------------------------------------------------+
@@ -126,9 +131,21 @@ int OnInit()
       return(INIT_PARAMETERS_INCORRECT);
    }
    
-   if(FastEMA_Period < 1 || SlowEMA_Period < 1 || ADX_Period < 1)
+   if(FastEMA_Period < 1 || SlowEMA_Period < 1 || ADX_Period < 1 || ATR_Period < 1)
    {
       Alert("Error: Period values must be greater than 0!");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+   
+   if(MACD_Fast >= MACD_Slow || MACD_Signal < 1)
+   {
+      Alert("Error: Invalid MACD parameters!");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+   
+   if(ArrowSize < 1 || ArrowSize > 5)
+   {
+      Alert("Error: Arrow size must be between 1 and 5!");
       return(INIT_PARAMETERS_INCORRECT);
    }
    
@@ -217,48 +234,43 @@ int OnCalculate(const int rates_total,
                 const int &spread[])
 {
    //--- Check for minimum bars
-   int minBars = MathMax(MathMax(SlowEMA_Period, MACD_Slow + MACD_Signal), MathMax(ADX_Period, ATR_Period)) + 10;
+   const int minBars = MathMax(MathMax(SlowEMA_Period, MACD_Slow + MACD_Signal), MathMax(ADX_Period, ATR_Period)) + MIN_BARS_OFFSET;
    if(rates_total < minBars)
       return(0);
    
+   //--- Calculate starting position
+   int start = (prev_calculated == 0) ? minBars : prev_calculated - 1;
+   
+   //--- Calculate bars to copy (optimize for recent bars only)
+   int bars_to_copy = (prev_calculated == 0) ? rates_total : rates_total - start + 3;
+   int copy_start = (prev_calculated == 0) ? 0 : start - 2;
+   
    //--- Copy indicator data
    double fastEMA[], slowEMA[];
-   double macdMain[], macdSignal[], macdHist[];
-   double adxValue[], plusDI[], minusDI[];
+   double macdMain[], macdSignal[];
+   double adxValue[];
    double atrValue[];
    
-   //--- Calculate starting position
-   int start;
-   if(prev_calculated == 0)
-   {
-      start = minBars;
-      ArrayInitialize(BuySignalBuffer, EMPTY_VALUE);
-      ArrayInitialize(SellSignalBuffer, EMPTY_VALUE);
-   }
-   else
-   {
-      start = prev_calculated - 1;
-   }
+   ArraySetAsSeries(fastEMA, false);
+   ArraySetAsSeries(slowEMA, false);
+   ArraySetAsSeries(macdMain, false);
+   ArraySetAsSeries(macdSignal, false);
+   ArraySetAsSeries(adxValue, false);
+   ArraySetAsSeries(atrValue, false);
    
-   //--- Copy EMA data
-   if(CopyBuffer(FastEMA_Handle, 0, 0, rates_total, fastEMA) <= 0) return(0);
-   if(CopyBuffer(SlowEMA_Handle, 0, 0, rates_total, slowEMA) <= 0) return(0);
+   //--- Copy only necessary data
+   if(CopyBuffer(FastEMA_Handle, 0, copy_start, bars_to_copy, fastEMA) <= 0) return(0);
+   if(CopyBuffer(SlowEMA_Handle, 0, copy_start, bars_to_copy, slowEMA) <= 0) return(0);
+   if(CopyBuffer(MACD_Handle, 0, copy_start, bars_to_copy, macdMain) <= 0) return(0);
+   if(CopyBuffer(MACD_Handle, 1, copy_start, bars_to_copy, macdSignal) <= 0) return(0);
+   if(CopyBuffer(ADX_Handle, 0, copy_start, bars_to_copy, adxValue) <= 0) return(0);
+   if(CopyBuffer(ATR_Handle, 0, copy_start, bars_to_copy, atrValue) <= 0) return(0);
    
-   //--- Copy MACD data
-   if(CopyBuffer(MACD_Handle, 0, 0, rates_total, macdMain) <= 0) return(0);
-   if(CopyBuffer(MACD_Handle, 1, 0, rates_total, macdSignal) <= 0) return(0);
+   //--- Adjust array offset for indexing
+   int offset = copy_start;
    
-   //--- Copy ADX data
-   if(CopyBuffer(ADX_Handle, 0, 0, rates_total, adxValue) <= 0) return(0);
-   if(CopyBuffer(ADX_Handle, 1, 0, rates_total, plusDI) <= 0) return(0);
-   if(CopyBuffer(ADX_Handle, 2, 0, rates_total, minusDI) <= 0) return(0);
-   
-   //--- Copy ATR data
-   if(CopyBuffer(ATR_Handle, 0, 0, rates_total, atrValue) <= 0) return(0);
-   
-   //--- Store EMA values for external access
-   ArrayCopy(FastEMA_Buffer, fastEMA);
-   ArrayCopy(SlowEMA_Buffer, slowEMA);
+   //--- Pre-calculate filters once
+   const bool spreadOK = CheckSpread();
    
    //--- Main calculation loop
    for(int i = start; i < rates_total; i++)
@@ -269,36 +281,43 @@ int OnCalculate(const int rates_total,
       //--- Skip if not enough data
       if(i < 2) continue;
       
-      //--- Calculate MACD histogram
-      double macdHistCurrent = macdMain[i] - macdSignal[i];
-      double macdHistPrev = macdMain[i-1] - macdSignal[i-1];
+      //--- Calculate array indices
+      const int idx = i - offset;
+      const int idx_prev = idx - 1;
+      
+      //--- Bounds check
+      if(idx < 1 || idx >= ArraySize(fastEMA)) continue;
       
       //--- Check for EMA crossover
-      bool emaCrossUp = (fastEMA[i] > slowEMA[i]) && (fastEMA[i-1] <= slowEMA[i-1]);
-      bool emaCrossDown = (fastEMA[i] < slowEMA[i]) && (fastEMA[i-1] >= slowEMA[i-1]);
+      const bool emaCrossUp = (fastEMA[idx] > slowEMA[idx]) && (fastEMA[idx_prev] <= slowEMA[idx_prev]);
+      const bool emaCrossDown = (fastEMA[idx] < slowEMA[idx]) && (fastEMA[idx_prev] >= slowEMA[idx_prev]);
       
-      //--- Check MACD conditions
-      bool macdBullish = (macdHistCurrent > 0) && (macdMain[i] > macdSignal[i]);
-      bool macdBearish = (macdHistCurrent < 0) && (macdMain[i] < macdSignal[i]);
+      //--- Skip if no crossover
+      if(!emaCrossUp && !emaCrossDown) continue;
+      
+      //--- Check MACD conditions (simplified)
+      const bool macdBullish = macdMain[idx] > macdSignal[idx];
+      const bool macdBearish = macdMain[idx] < macdSignal[idx];
       
       //--- Check ADX condition
-      bool adxStrong = adxValue[i] >= ADX_MinLevel;
+      const bool adxStrong = adxValue[idx] >= ADX_MinLevel;
+      if(!adxStrong) continue;
       
-      //--- Check filters
-      bool sessionOK = CheckSession(time[i]);
-      bool spreadOK = CheckSpread();
+      //--- Check session filter
+      const bool sessionOK = CheckSession(time[i]);
+      if(!sessionOK || !spreadOK) continue;
       
       //--- Generate BUY signal
-      if(emaCrossUp && macdBullish && adxStrong && sessionOK && spreadOK)
+      if(emaCrossUp && macdBullish)
       {
-         BuySignalBuffer[i] = low[i] - (atrValue[i] * 0.5);  // Place arrow below candle
+         BuySignalBuffer[i] = low[i] - (atrValue[idx] * ARROW_OFFSET_MULTIPLIER);
          
          //--- Send alerts only for the latest bar
          if(i == rates_total - 1 && LastAlertBar != rates_total)
          {
             double slPrice, tpPrice;
-            CalculateSLTP(close[i], true, atrValue[i], slPrice, tpPrice);
-            SendSignalAlert("BUY", close[i], slPrice, tpPrice, adxValue[i]);
+            CalculateSLTP(close[i], true, atrValue[idx], slPrice, tpPrice);
+            SendSignalAlert("BUY", close[i], slPrice, tpPrice, adxValue[idx]);
             
             if(ShowSLTP)
                DrawSLTPLines(slPrice, tpPrice, true);
@@ -306,18 +325,17 @@ int OnCalculate(const int rates_total,
             LastAlertBar = rates_total;
          }
       }
-      
       //--- Generate SELL signal
-      if(emaCrossDown && macdBearish && adxStrong && sessionOK && spreadOK)
+      else if(emaCrossDown && macdBearish)
       {
-         SellSignalBuffer[i] = high[i] + (atrValue[i] * 0.5);  // Place arrow above candle
+         SellSignalBuffer[i] = high[i] + (atrValue[idx] * ARROW_OFFSET_MULTIPLIER);
          
          //--- Send alerts only for the latest bar
          if(i == rates_total - 1 && LastAlertBar != rates_total)
          {
             double slPrice, tpPrice;
-            CalculateSLTP(close[i], false, atrValue[i], slPrice, tpPrice);
-            SendSignalAlert("SELL", close[i], slPrice, tpPrice, adxValue[i]);
+            CalculateSLTP(close[i], false, atrValue[idx], slPrice, tpPrice);
+            SendSignalAlert("SELL", close[i], slPrice, tpPrice, adxValue[idx]);
             
             if(ShowSLTP)
                DrawSLTPLines(slPrice, tpPrice, false);
@@ -327,14 +345,17 @@ int OnCalculate(const int rates_total,
       }
    }
    
-   //--- Update info panel
-   if(ShowInfoPanel)
+   //--- Update info panel (only on new bar or first calculation)
+   if(ShowInfoPanel && (prev_calculated == 0 || rates_total != prev_calculated))
    {
-      int lastIdx = rates_total - 1;
-      string trend = (fastEMA[lastIdx] > slowEMA[lastIdx]) ? "BULLISH" : "BEARISH";
-      string session = GetCurrentSession();
-      int currentSpread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-      UpdateInfoPanel(trend, adxValue[lastIdx], session, currentSpread, atrValue[lastIdx]);
+      const int lastIdx = ArraySize(fastEMA) - 1;
+      if(lastIdx >= 0)
+      {
+         const string trend = (fastEMA[lastIdx] > slowEMA[lastIdx]) ? "BULLISH" : "BEARISH";
+         const string session = GetCurrentSession();
+         const int currentSpread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+         UpdateInfoPanel(trend, adxValue[lastIdx], session, currentSpread, atrValue[lastIdx]);
+      }
    }
    
    return(rates_total);
@@ -386,18 +407,19 @@ string GetCurrentSession()
 {
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(), dt);
-   int hour = dt.hour;
+   const int hour = dt.hour;
    
+   //--- Check overlapping sessions first
    if(hour >= 13 && hour < 16)
       return "LONDON/NY";
-   else if(hour >= 8 && hour < 16)
-      return "LONDON";
-   else if(hour >= 13 && hour < 21)
+   if(hour >= 16 && hour < 21)
       return "NEW YORK";
-   else if(hour >= 0 && hour < 8)
+   if(hour >= 8 && hour < 13)
+      return "LONDON";
+   if(hour >= 0 && hour < 8)
       return "ASIAN";
-   else
-      return "OFF-HOURS";
+   
+   return "OFF-HOURS";
 }
 
 //+------------------------------------------------------------------+
@@ -405,7 +427,7 @@ string GetCurrentSession()
 //+------------------------------------------------------------------+
 void CalculateSLTP(double entryPrice, bool isBuy, double atr, double &sl, double &tp)
 {
-   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   const double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    
    if(SL_TP_Mode == MODE_FIXED)
    {
@@ -441,8 +463,8 @@ void CalculateSLTP(double entryPrice, bool isBuy, double atr, double &sl, double
 void SendSignalAlert(string signalType, double price, double sl, double tp, double adx)
 {
    //--- Prevent duplicate alerts
-   datetime currentTime = TimeCurrent();
-   if(currentTime - LastAlertTime < 60) // 60 second cooldown
+   const datetime currentTime = TimeCurrent();
+   if(currentTime - LastAlertTime < ALERT_COOLDOWN_SECONDS)
       return;
    
    LastAlertTime = currentTime;
