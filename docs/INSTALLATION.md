@@ -11,45 +11,55 @@
 
 ### Method 1: Manual Installation
 
-1. **Download the Indicator File**
-   - Download `GoldTrendScalper.mq5` from this repository
+1. **Download the MQL5 File**
+   - Download `GoldTrendScalper.mq5` for the indicator
+   - Optional: download `GoldDashboardEA.mq5` for the Expert Advisor dashboard
 
 2. **Locate Your MT5 Data Folder**
    - Open MetaTrader 5
    - Click **File** > **Open Data Folder**
-   - Navigate to `MQL5/Indicators/`
+   - Navigate to `MQL5/Indicators/` for the indicator or `MQL5/Experts/` for the EA
 
-3. **Copy the Indicator File**
+3. **Copy the MQL5 File**
    - Copy `GoldTrendScalper.mq5` to the `MQL5/Indicators/` folder
+   - Copy `GoldDashboardEA.mq5` to the `MQL5/Experts/` folder if you want the EA dashboard
 
-4. **Compile the Indicator**
+4. **Compile the MQL5 File**
    - In MT5, open **Navigator** (Ctrl+N)
-   - Right-click on **Indicators** and select **Refresh**
-   - Double-click on `GoldTrendScalper` to open in MetaEditor
+   - Right-click on **Indicators** or **Expert Advisors** and select **Refresh**
+   - Double-click on `GoldTrendScalper` or `GoldDashboardEA` to open in MetaEditor
    - Press **F7** or click **Compile** button
    - Ensure there are no errors (0 errors, 0 warnings)
 
 5. **Add to Chart**
    - Open a XAUUSD (Gold) chart
-   - In Navigator, find `GoldTrendScalper` under Indicators
+   - In Navigator, find `GoldTrendScalper` under Indicators or `GoldDashboardEA` under Expert Advisors
    - Drag and drop onto the chart, or double-click to apply
+   - For the EA, keep `InpEnableTrading=false` until you have reviewed settings and enabled MT5 AutoTrading intentionally
+
+### Expert Advisor Safety Notes
+
+- `GoldDashboardEA.mq5` defaults to `InpEnableTrading=false`.
+- Set your OpenAI API key in the EA inputs if enabling live AI analysis.
+- Add `https://api.openai.com` under **Tools** > **Options** > **Expert Advisors** > **Allow WebRequest for listed URL**.
+- Review lot size, spread limit, max positions, daily loss, and drawdown settings before enabling live trading.
 
 ### Method 2: Direct Installation via MetaEditor
 
 1. **Open MetaEditor**
    - In MT5, press **F4** or click **Tools** > **MetaQuotes Language Editor**
 
-2. **Create New Indicator**
-   - Click **File** > **New** > **Custom Indicator**
-   - Name it `GoldTrendScalper`
+2. **Create New MQL5 File**
+   - Click **File** > **New** > **Custom Indicator** or **Expert Advisor**
+   - Name it `GoldTrendScalper` or `GoldDashboardEA`
 
 3. **Replace Code**
    - Delete the template code
-   - Copy and paste the entire code from `GoldTrendScalper.mq5`
+   - Copy and paste the entire code from `GoldTrendScalper.mq5` or `GoldDashboardEA.mq5`
 
 4. **Compile and Use**
    - Press **F7** to compile
-   - Return to MT5 (F5) and apply the indicator to your chart
+   - Return to MT5 (F5) and apply the indicator or EA to your chart
 
 ## Post-Installation Setup
 
@@ -106,17 +116,17 @@
 3. Verify spread is below the maximum threshold
 4. ADX might be below the minimum level (weak trend)
 
-## Updating the Indicator
+## Updating
 
 1. Replace the old `.mq5` file with the new version
 2. Recompile in MetaEditor (F7)
-3. Remove and re-add the indicator to charts
+3. Remove and re-add the indicator or EA to charts
 
 ## Uninstallation
 
-1. Remove the indicator from all charts
-2. Delete `GoldTrendScalper.mq5` from `MQL5/Indicators/`
-3. Delete `GoldTrendScalper.ex5` (compiled file) if present
+1. Remove the indicator or EA from all charts
+2. Delete `GoldTrendScalper.mq5` from `MQL5/Indicators/` and/or `GoldDashboardEA.mq5` from `MQL5/Experts/`
+3. Delete matching `.ex5` compiled files if present
 
 ## Support
 

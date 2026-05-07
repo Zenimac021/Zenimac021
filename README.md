@@ -1,6 +1,6 @@
 # Gold Trend Scalper
 
-A professional MQL5 signal indicator for trading Gold (XAUUSD) on scalping timeframes.
+Professional MQL5 tools for trading Gold (XAUUSD) on scalping timeframes, including a signal indicator and an AI-assisted Expert Advisor dashboard.
 
 ## Features
 
@@ -10,6 +10,7 @@ A professional MQL5 signal indicator for trading Gold (XAUUSD) on scalping timef
 - **SL/TP Levels**: Automatic calculation using fixed points or ATR-based methods
 - **Full Alert System**: Sound, push notifications, and email alerts
 - **Information Panel**: Real-time display of trend, ADX, session, and spread status
+- **Gold Dashboard EA**: AI-assisted Expert Advisor with dashboard panels, optional OpenAI analysis, spread/risk gates, normalized order volume, and safer auto-trading defaults
 
 ## Signal Logic
 
@@ -30,8 +31,9 @@ A professional MQL5 signal indicator for trading Gold (XAUUSD) on scalping timef
 ## Installation
 
 1. Copy [`GoldTrendScalper.mq5`](MQL5/Indicators/GoldTrendScalper.mq5) to your MT5 `Data Folder/MQL5/Indicators/`
-2. Compile in MetaEditor (press F7)
-3. Drag and drop onto a XAUUSD chart
+2. Optional: copy [`GoldDashboardEA.mq5`](MQL5/Experts/GoldDashboardEA.mq5) to your MT5 `Data Folder/MQL5/Experts/`
+3. Compile in MetaEditor (press F7)
+4. Drag and drop onto a XAUUSD chart
 
 See the full [Installation Guide](docs/INSTALLATION.md) for detailed instructions.
 
