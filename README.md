@@ -1,4 +1,15 @@
-# Gold Trend Scalper
+# Zenimac021 — MQL5 Tooling for Gold Trading
+
+This repository hosts MQL5 tooling for trading gold on MetaTrader 5.
+
+| Tool | Type | Source | Docs |
+|---|---|---|---|
+| Gold Trend Scalper | Indicator | [`MQL5/Indicators/GoldTrendScalper.mq5`](MQL5/Indicators/GoldTrendScalper.mq5) | [User Guide](docs/USER_GUIDE.md) |
+| RoNz Auto SL n TP | Expert Advisor | [`MQL5/Experts/RoNzAutoSLTP.mq5`](MQL5/Experts/RoNzAutoSLTP.mq5) | [Reference](docs/RONZ_AUTO_SLTP.md) |
+
+---
+
+## Gold Trend Scalper
 
 A professional MQL5 signal indicator for trading Gold (XAUUSD) on scalping timeframes.
 
