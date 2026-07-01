@@ -142,9 +142,10 @@ private:
     int hADX, hEMA_F, hEMA_S, hVol, hATR;
     int h1EMAHandle;           // FIX: Cache H1 EMA handle instead of recreating
     datetime h1EMAUpdateTime;  // Track when H1 EMA was last cached
+    bool m_trendFilterEnabled; // FIX: Internal flag instead of modifying input variable
     
 public:
-    TradeManager() : h1EMAHandle(INVALID_HANDLE), h1EMAUpdateTime(0) {
+    TradeManager() : h1EMAHandle(INVALID_HANDLE), h1EMAUpdateTime(0), m_trendFilterEnabled(enableTrendFilter) {
         m_sym.Name(_Symbol);
         m_trade.SetExpertMagicNumber(MAGIC);
 
@@ -174,11 +175,11 @@ public:
         }
 
         // FIX: Cache H1 EMA once during initialization
-        if(enableTrendFilter) {
+        if(m_trendFilterEnabled) {
             h1EMAHandle = iMA(_Symbol, PERIOD_H1, 50, 0, MODE_EMA, PRICE_CLOSE);
             if(h1EMAHandle == INVALID_HANDLE) {
                 Print("WARNING: H1 EMA indicator could not be created");
-                enableTrendFilter = false;
+                m_trendFilterEnabled = false;  // FIX: Modify internal flag instead of input
             }
         }
 
@@ -249,7 +250,7 @@ public:
     }
 
     bool CheckFilters(int dir) {
-        if(enableTrendFilter && h1EMAHandle != INVALID_HANDLE) {
+        if(m_trendFilterEnabled && h1EMAHandle != INVALID_HANDLE) {  // FIX: Use internal flag
             double h1CloseArray[];
             if(CopyClose(_Symbol, PERIOD_H1, 1, 1, h1CloseArray) < 1) {
                 return false;
