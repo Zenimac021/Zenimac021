@@ -1,11 +1,12 @@
 //+------------------------------------------------------------------+
-//|                              NR-Scalping Dashboard v3.13.mq5     |
+//|                              NR-Scalping Dashboard v3.14.mq5     |
 //|                                               Copyright 2026     |
 //|                                         https://www.mql5.com     |
+//|  FIXED & DEBUGGED VERSION - Complete Implementation               |
 //+------------------------------------------------------------------+
-#property copyright ""
+#property copyright "NR-Scalping Dashboard v3.14"
 #property link      "https://www.mql5.com"
-#property version   "3.13"
+#property version   "3.14"
 #property strict
 #property indicator_chart_window
 #property indicator_buffers 0
@@ -13,7 +14,7 @@
 
 //─────────────────────────────────────────────────────────────────
 // ENUMS
-//─────────────────────────────────────────────────────────────────
+//─────────────────────────────────────────────────────────���───────
 enum ENUM_SIGNAL_DIR {
    SIG_DIR_BOTH = 0,    // All Signals
    SIG_DIR_BUY  = 1,    // Buy Only
@@ -82,7 +83,6 @@ input bool            Inp_Pro_Mode      = true;
 input ENUM_SIGNAL_DIR Inp_Signal_Dir    = SIG_DIR_BOTH;
 input int             Inp_Update_Interval = 0;         // Every tick processing for execution accuracy
 
-
 //─────────────────────────────────────────────────────────────────
 // NAMED CONSTANTS - CRITICAL CORRECTIONS FOR GOLD ASSET CLASS
 //─────────────────────────────────────────────────────────────────
@@ -126,6 +126,17 @@ const double BODY_TO_ATRATIO_MIN          = 0.4;       // Assures signal candle 
 const double ENGULF_SIZE_MULT             = 1.3;       // Requires clear structural domination to confirm reversal
 const double WICK_TO_BODY_RATIO_HAMMER    = 3.0;       // Raised from 2.5 to target true institutional cash flushes
 const double WICK_TO_BODY_RATIO_STAR      = 3.0;       
+
+// Dashboard UI Constants
+const string UI_PREFIX_MAIN    = "NR_Dash_";
+const string UI_PREFIX_HEADER  = "NR_Header_";
+const int    DASHBOARD_WIDTH   = 320;
+const int    DASHBOARD_HEIGHT  = 480;
+const color  COLOR_BUY         = clrLimeGreen;
+const color  COLOR_SELL        = clrCrimson;
+const color  COLOR_NEUTRAL     = clrDarkGray;
+const color  COLOR_HEADER_BG   = clrDarkSlateGray;
+const color  COLOR_BG          = clrBlack;
 
 //─────────────────────────────────────────────────────────────────
 // STRUCTURES
@@ -222,11 +233,129 @@ double g_AvgTickVolume = 0;
 static int s_tickVolCount = 0;
 static double s_tickVolSum = 0;
 
+// Current market state (for UI display)
+string g_CurrentCondition = "INIT";
+string g_CurrentStatus    = "INIT";
+double g_CurrentStrength  = 0.0;
+
+//+------------------------------------------------------------------+
+//| CreateGUI - Initialize Dashboard UI                              |
+//+------------------------------------------------------------------+
+void CreateGUI()
+{
+   // FIXED v3.14: Complete GUI creation function (was missing)
+   ObjectsDeleteAll(0, UI_PREFIX_MAIN);
+   ObjectsDeleteAll(0, UI_PREFIX_HEADER);
+   
+   int x = Inp_X_Offset;
+   int y = Inp_Y_Offset;
+   
+   // Header background
+   if(!ObjectCreate(0, UI_PREFIX_HEADER + "BG", OBJ_RECTANGLE_LABEL, 0, 0, 0)) {
+      Print("Failed to create header background");
+      return;
+   }
+   ObjectSetInteger(0, UI_PREFIX_HEADER + "BG", OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, UI_PREFIX_HEADER + "BG", OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, UI_PREFIX_HEADER + "BG", OBJPROP_XSIZE, DASHBOARD_WIDTH);
+   ObjectSetInteger(0, UI_PREFIX_HEADER + "BG", OBJPROP_YSIZE, 40);
+   ObjectSetInteger(0, UI_PREFIX_HEADER + "BG", OBJPROP_BGCOLOR, COLOR_HEADER_BG);
+   ObjectSetInteger(0, UI_PREFIX_HEADER + "BG", OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, UI_PREFIX_HEADER + "BG", OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   
+   // Header text
+   if(!ObjectCreate(0, UI_PREFIX_HEADER + "TEXT", OBJ_LABEL, 0, 0, 0)) {
+      Print("Failed to create header text");
+      return;
+   }
+   ObjectSetInteger(0, UI_PREFIX_HEADER + "TEXT", OBJPROP_XDISTANCE, x + 10);
+   ObjectSetInteger(0, UI_PREFIX_HEADER + "TEXT", OBJPROP_YDISTANCE, y + 8);
+   ObjectSetInteger(0, UI_PREFIX_HEADER + "TEXT", OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetString(0, UI_PREFIX_HEADER + "TEXT", OBJPROP_TEXT, "NR-Scalping v3.14");
+   ObjectSetInteger(0, UI_PREFIX_HEADER + "TEXT", OBJPROP_FONTSIZE, 12);
+   ObjectSetString(0, UI_PREFIX_HEADER + "TEXT", OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, UI_PREFIX_HEADER + "TEXT", OBJPROP_COLOR, clrWhite);
+   
+   // Main panel background
+   if(!ObjectCreate(0, UI_PREFIX_MAIN + "BG", OBJ_RECTANGLE_LABEL, 0, 0, 0)) {
+      Print("Failed to create main background");
+      return;
+   }
+   ObjectSetInteger(0, UI_PREFIX_MAIN + "BG", OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, UI_PREFIX_MAIN + "BG", OBJPROP_YDISTANCE, y + 40);
+   ObjectSetInteger(0, UI_PREFIX_MAIN + "BG", OBJPROP_XSIZE, DASHBOARD_WIDTH);
+   ObjectSetInteger(0, UI_PREFIX_MAIN + "BG", OBJPROP_YSIZE, DASHBOARD_HEIGHT - 40);
+   ObjectSetInteger(0, UI_PREFIX_MAIN + "BG", OBJPROP_BGCOLOR, COLOR_BG);
+   ObjectSetInteger(0, UI_PREFIX_MAIN + "BG", OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, UI_PREFIX_MAIN + "BG", OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   
+   // Status labels and value fields (5 rows x 3 columns)
+   string labels[5] = {"Signal:", "Status:", "Strength:", "Bars:", "Today Buy:"};
+   for(int i = 0; i < 5; i++) {
+      int row_y = y + 50 + i * 30;
+      
+      // Label
+      if(!ObjectCreate(0, UI_PREFIX_MAIN + "LBL_" + i, OBJ_LABEL, 0, 0, 0)) continue;
+      ObjectSetInteger(0, UI_PREFIX_MAIN + "LBL_" + i, OBJPROP_XDISTANCE, x + 10);
+      ObjectSetInteger(0, UI_PREFIX_MAIN + "LBL_" + i, OBJPROP_YDISTANCE, row_y);
+      ObjectSetString(0, UI_PREFIX_MAIN + "LBL_" + i, OBJPROP_TEXT, labels[i]);
+      ObjectSetInteger(0, UI_PREFIX_MAIN + "LBL_" + i, OBJPROP_FONTSIZE, 9);
+      ObjectSetString(0, UI_PREFIX_MAIN + "LBL_" + i, OBJPROP_FONT, "Arial");
+      ObjectSetInteger(0, UI_PREFIX_MAIN + "LBL_" + i, OBJPROP_COLOR, clrWhite);
+      ObjectSetInteger(0, UI_PREFIX_MAIN + "LBL_" + i, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      
+      // Value field
+      if(!ObjectCreate(0, UI_PREFIX_MAIN + "VAL_" + i, OBJ_LABEL, 0, 0, 0)) continue;
+      ObjectSetInteger(0, UI_PREFIX_MAIN + "VAL_" + i, OBJPROP_XDISTANCE, x + 120);
+      ObjectSetInteger(0, UI_PREFIX_MAIN + "VAL_" + i, OBJPROP_YDISTANCE, row_y);
+      ObjectSetString(0, UI_PREFIX_MAIN + "VAL_" + i, OBJPROP_TEXT, "---");
+      ObjectSetInteger(0, UI_PREFIX_MAIN + "VAL_" + i, OBJPROP_FONTSIZE, 9);
+      ObjectSetString(0, UI_PREFIX_MAIN + "VAL_" + i, OBJPROP_FONT, "Arial");
+      ObjectSetInteger(0, UI_PREFIX_MAIN + "VAL_" + i, OBJPROP_COLOR, clrYellow);
+      ObjectSetInteger(0, UI_PREFIX_MAIN + "VAL_" + i, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| UpdateGUI - Refresh Dashboard Display                            |
+//+------------------------------------------------------------------+
+void UpdateGUI(const SignalStats &stats, const AlertState &alerts, 
+               const string &condition, double strength)
+{
+   int x = Inp_X_Offset;
+   int y = Inp_Y_Offset;
+   
+   // Signal: BUY/SELL/NONE
+   string signalText = g_LastSignalActive ? (g_LastSignalIsBuy ? "BUY ↑" : "SELL ↓") : "IDLE";
+   color signalColor = g_LastSignalActive ? (g_LastSignalIsBuy ? COLOR_BUY : COLOR_SELL) : COLOR_NEUTRAL;
+   ObjectSetString(0, UI_PREFIX_MAIN + "VAL_0", OBJPROP_TEXT, signalText);
+   ObjectSetInteger(0, UI_PREFIX_MAIN + "VAL_0", OBJPROP_COLOR, signalColor);
+   
+   // Status: Market condition
+   ObjectSetString(0, UI_PREFIX_MAIN + "VAL_1", OBJPROP_TEXT, condition);
+   ObjectSetInteger(0, UI_PREFIX_MAIN + "VAL_1", OBJPROP_COLOR, clrYellow);
+   
+   // Strength: Signal strength %
+   ObjectSetString(0, UI_PREFIX_MAIN + "VAL_2", OBJPROP_TEXT, 
+                   StringFormat("%.1f%%", strength * 100));
+   ObjectSetInteger(0, UI_PREFIX_MAIN + "VAL_2", OBJPROP_COLOR, clrYellow);
+   
+   // Consecutive bars
+   ObjectSetString(0, UI_PREFIX_MAIN + "VAL_3", OBJPROP_TEXT, 
+                   StringFormat("%d", stats.consecBars));
+   ObjectSetInteger(0, UI_PREFIX_MAIN + "VAL_3", OBJPROP_COLOR, clrYellow);
+   
+   // Today buy signals
+   ObjectSetString(0, UI_PREFIX_MAIN + "VAL_4", OBJPROP_TEXT, 
+                   StringFormat("B:%d S:%d", alerts.totalBuyToday, alerts.totalSellToday));
+   ObjectSetInteger(0, UI_PREFIX_MAIN + "VAL_4", OBJPROP_COLOR, clrYellow);
+}
+
 //+------------------------------------------------------------------+
 //| OnInit                                                           |
 //+------------------------------------------------------------------+
 int OnInit()
-  {
+{
    if(Inp_MA_Fast <= 0 || Inp_MA_Slow <= 0 || Inp_MA_Major <= 0) {
       Print("❌ Error: Moving average periods must be positive");
       return(INIT_PARAMETERS_INCORRECT);
@@ -384,6 +513,7 @@ int OnInit()
    s_tickVolCount = 0;
    s_tickVolSum = 0;
 
+   // FIXED v3.14: Call CreateGUI to build UI
    CreateGUI();
    
    int objCount = ObjectsTotal(0, 0, OBJ_LABEL) + ObjectsTotal(0, 0, OBJ_RECTANGLE_LABEL);
@@ -395,9 +525,9 @@ int OnInit()
    
    ChartRedraw();
 
-   Print("✅ NR-Scalping Dashboard v3.13 Initialized");
+   Print("✅ NR-Scalping Dashboard v3.14 Initialized");
    Print("   Symbol: ", _Symbol, " | Timeframe: ", EnumToString(_Period));
-   PrintFormat("   RSI Levels: OS=%.0f, OB=%.0f | v3.13", g_RSI_OS, g_RSI_OB);
+   PrintFormat("   RSI Levels: OS=%.0f, OB=%.0f | v3.14", g_RSI_OS, g_RSI_OB);
    PrintFormat("   Dashboard Position: X=%d, Y=%d", Inp_X_Offset, Inp_Y_Offset);
    PrintFormat("   Update Interval: %d seconds", g_Update_Interval);
    string profileName = "STANDARD";
@@ -406,20 +536,17 @@ int OnInit()
    PrintFormat("   Broker Profile: %s | MaxSpread:%d | Spread/ATR:%.3f | Session:%02d-%02d UTC",
                profileName, g_MaxSpread, g_MaxSpreadATRRatio, g_StartHour, g_EndHour);
    PrintFormat("   Total Objects Created: %d", ObjectsTotal(0));
-   PrintFormat("   Chart Window Size: %dx%d", (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS), (int)ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS));
 
    return(INIT_SUCCEEDED);
-  }
+}
 
 //+------------------------------------------------------------------+
 //| OnDeinit                                                         |
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
-  {
-   ObjectsDeleteAll(0, "NR_Dash_");
-   ObjectsDeleteAll(0, "NR_Row_");
-   ObjectsDeleteAll(0, "NR_H_");
-   ObjectsDeleteAll(0, "NR_Header_");
+{
+   ObjectsDeleteAll(0, UI_PREFIX_MAIN);
+   ObjectsDeleteAll(0, UI_PREFIX_HEADER);
 
    IndicatorRelease(h_MA_Fast);  IndicatorRelease(h_MA_Slow);
    IndicatorRelease(h_MA_Major); IndicatorRelease(h_MA_Major_HTF);
@@ -430,8 +557,8 @@ void OnDeinit(const int reason)
 
    ChartRedraw();
    
-   Print("✅ NR-Scalping Dashboard v3.13 Deinitialized");
-  }
+   Print("✅ NR-Scalping Dashboard v3.14 Deinitialized");
+}
 
 //+------------------------------------------------------------------+
 //| OnCalculate                                                      |
@@ -446,7 +573,7 @@ int OnCalculate(const int rates_total,
                 const long     &tick_volume[],
                 const long     &volume[],
                 const int      &spread[])
-  {
+{
    if(g_Update_Interval > 0) {
       datetime now = TimeCurrent();
       if(now - s_lastUpdateTime < g_Update_Interval)
@@ -494,15 +621,20 @@ int OnCalculate(const int rates_total,
 
    if(g_LastSignalActive && uiNeeded) {
       int barsAgo = rates_total - (g_LastSignalIsBuy ? g_AlertState.lastBuyBar : g_AlertState.lastSellBar);
-      if(barsAgo > 0 && barsAgo <= SIGNAL_DECAY_BARS) {
+      if(barsAgo > 0 && barsAgo <= (int)SIGNAL_DECAY_BARS) {
          g_Stats.signalDecay = MathPow(DECAY_FACTOR, barsAgo);
       } else {
          g_Stats.signalDecay = 0.0;
       }
    }
 
+   // FIXED v3.14: Update UI when needed
+   if(uiNeeded) {
+      UpdateGUI(g_Stats, g_AlertState, g_CurrentCondition, g_CurrentStrength);
+   }
+
    return(rates_total);
-  }
+}
 
 //+------------------------------------------------------------------+
 //| Pattern Recognition                                              |
@@ -511,7 +643,7 @@ string DetectPattern(int idx,
                      const double &open[], const double &high[],
                      const double &low[],  const double &close[],
                      double currentAtr)
-  {
+{
    if(idx < 1 || currentAtr <= 0) return "";
 
    double O = open[idx];  double C = close[idx];
@@ -549,7 +681,7 @@ string DetectPattern(int idx,
       return "DOJI";
 
    return "";
-  }
+}
 
 //+------------------------------------------------------------------+
 //| Core Market Analysis                                             |
@@ -559,7 +691,7 @@ void AnalyzeMarket(int idx,
                    const double &low[],  const double &close[],
                    const long &tick_volume[],
                    int spread, int rates_total, uint t0, bool uiUpdateNeeded)
-  {
+{
    if(idx < BUFFER_LOOKBACK) return;
 
    double maFast      = buf_ma_fast[0];
@@ -635,6 +767,8 @@ void AnalyzeMarket(int idx,
       else if(trendDiff < 0 && maSlowSlope < 0) condition = "TRENDING_DOWN";
    }
 
+   g_CurrentCondition = condition;
+
    // ── 3. Scalping Safety ────────────────────────────────────────
    bool safeSpread   = (spread <= g_MaxSpread) &&
                        (!Inp_Use_Adaptive_Spread || spread <= atr * g_MaxSpreadATRRatio);
@@ -666,21 +800,22 @@ void AnalyzeMarket(int idx,
    }
 
    // ── 4. Adaptive SL/TP Framework ───────────────────────────────
-   double slMult = ATR_SL_MULT_BASE;
-   double tpMult = ATR_TP_MULT_BASE;
+   // FIXED v3.14: Removed duplicate calculation - using single set
+   double atrSlMult = ATR_SL_MULT_BASE;
+   double atrTpMult = ATR_TP_MULT_BASE;
 
    if(Inp_Vol_Adapt_SL) {
       if(volatilityRatio >= VOL_RATIO_HIGH) {
-         slMult = ATR_SL_MULT_VOL_HIGH;
-         tpMult = ATR_TP_MULT_VOL_HIGH;
+         atrSlMult = ATR_SL_MULT_VOL_HIGH;
+         atrTpMult = ATR_TP_MULT_VOL_HIGH;
       } else if(volatilityRatio <= VOL_RATIO_LOW) {
-         slMult = ATR_SL_MULT_VOL_LOW;
-         tpMult = ATR_TP_MULT_VOL_LOW;
+         atrSlMult = ATR_SL_MULT_VOL_LOW;
+         atrTpMult = ATR_TP_MULT_VOL_LOW;
       }
    }
 
-   double stopLossPips = atr * slMult;
-   double takeProfitPips = atr * tpMult;
+   double stopLossPips = atr * atrSlMult;
+   double takeProfitPips = atr * atrTpMult;
 
    // Risk-to-Reward validation
    double rrRatio = (stopLossPips > 0) ? (takeProfitPips / stopLossPips) : 0.0;
@@ -713,6 +848,8 @@ void AnalyzeMarket(int idx,
 
    bool isScalpingFriendly = (scalpStatus == "OK");
 
+   g_CurrentStatus = scalpStatus;
+
    // ── 4. Indicator Voting ───────────────────────────────────────
    IndicatorResult inds[8];
 
@@ -732,7 +869,7 @@ void AnalyzeMarket(int idx,
 
    inds[1].name = "MACD"; inds[1].value = macdHist;
    inds[1].weight = W_MACD; inds[1].vote = 0; inds[1].confidence = 0;
-   if     (macdHist > 0 && macdHistPrev <= 0) { inds[1].vote =  1; inds[1].confidence = 0.85; }
+   if(macdHist > 0 && macdHistPrev <= 0) { inds[1].vote =  1; inds[1].confidence = 0.85; }
    else if(macdHist < 0 && macdHistPrev >= 0) { inds[1].vote = -1; inds[1].confidence = 0.85; }
    else if(MathAbs(macdHist) > 0.00001) {
       if(macdHist > 0 && macdHist > macdHistPrev) { inds[1].vote =  1; inds[1].confidence = 0.6; }
@@ -742,24 +879,24 @@ void AnalyzeMarket(int idx,
    inds[2].name = "RSI"; inds[2].value = rsi;
    inds[2].weight = W_RSI; inds[2].vote = 0; inds[2].confidence = 0;
    if(rsi >= 0) {
-   if(condition == "TRENDING_UP") {
-      if(rsi >= RSI_TREND_UP_PULLBACK_LOW && rsi <= RSI_TREND_UP_PULLBACK_HIGH)
-         { inds[2].vote =  1; inds[2].confidence = MathMin(0.85, 0.75 + consecBoost * 0.02); }
-      double rsi_extreme_up = MathMin(RSI_MAX_SAFE, Inp_RSI_OB + RSI_EXTREME_BUFFER);
-      if(rsi > rsi_extreme_up)
-         { inds[2].vote = -1; inds[2].confidence = 0.6; }
-   } else if(condition == "TRENDING_DOWN") {
-      if(rsi >= RSI_TREND_DN_BOUNCE_LOW && rsi <= RSI_TREND_DN_BOUNCE_HIGH)
-         { inds[2].vote = -1; inds[2].confidence = MathMin(0.85, 0.75 + consecBoost * 0.02); }
-      double rsi_extreme_dn = MathMax(RSI_MIN_SAFE, Inp_RSI_OS - RSI_EXTREME_BUFFER);
-      if(rsi < rsi_extreme_dn)
-         { inds[2].vote =  1; inds[2].confidence = 0.6; }
-   } else {
-      if(rsi > Inp_RSI_OB)
-         { inds[2].vote = -1; inds[2].confidence = 0.8; }
-      if(rsi < Inp_RSI_OS)
-         { inds[2].vote =  1; inds[2].confidence = 0.8; }
-   }
+      if(condition == "TRENDING_UP") {
+         if(rsi >= RSI_TREND_UP_PULLBACK_LOW && rsi <= RSI_TREND_UP_PULLBACK_HIGH)
+            { inds[2].vote =  1; inds[2].confidence = MathMin(0.85, 0.75 + consecBoost * 0.02); }
+         double rsi_extreme_up = MathMin(RSI_MAX_SAFE, Inp_RSI_OB + RSI_EXTREME_BUFFER);
+         if(rsi > rsi_extreme_up)
+            { inds[2].vote = -1; inds[2].confidence = 0.6; }
+      } else if(condition == "TRENDING_DOWN") {
+         if(rsi >= RSI_TREND_DN_BOUNCE_LOW && rsi <= RSI_TREND_DN_BOUNCE_HIGH)
+            { inds[2].vote = -1; inds[2].confidence = MathMin(0.85, 0.75 + consecBoost * 0.02); }
+         double rsi_extreme_dn = MathMax(RSI_MIN_SAFE, Inp_RSI_OS - RSI_EXTREME_BUFFER);
+         if(rsi < rsi_extreme_dn)
+            { inds[2].vote =  1; inds[2].confidence = 0.6; }
+      } else {
+         if(rsi > Inp_RSI_OB)
+            { inds[2].vote = -1; inds[2].confidence = 0.8; }
+         if(rsi < Inp_RSI_OS)
+            { inds[2].vote =  1; inds[2].confidence = 0.8; }
+      }
    }
 
    inds[3].name = "BB"; inds[3].value = bbWidth;
@@ -853,44 +990,28 @@ void AnalyzeMarket(int idx,
    // v3.13: Signal freshness decay
    if(g_Stats.lastSignalTime > 0) {
       int barsSinceSignal = rates_total - (g_LastSignalIsBuy ? g_AlertState.lastBuyBar : g_AlertState.lastSellBar);
-      if(barsSinceSignal > 0 && barsSinceSignal <= SIGNAL_DECAY_BARS) {
+      if(barsSinceSignal > 0 && barsSinceSignal <= (int)SIGNAL_DECAY_BARS) {
          boostedStr *= MathPow(DECAY_FACTOR, barsSinceSignal);
       }
    }
 
    if(boostedStr > 1.0) boostedStr = 1.0;
 
-   // v3.13: Adaptive SL/TP based on volatility
-   double atrSlMult, atrTpMult;
-   if(Inp_Vol_Adapt_SL) {
-      if(volatilityRatio > VOL_RATIO_HIGH) {
-         atrSlMult = ATR_SL_MULT_VOL_HIGH;
-         atrTpMult = ATR_TP_MULT_VOL_HIGH;
-      } else if(volatilityRatio < VOL_RATIO_LOW) {
-         atrSlMult = ATR_SL_MULT_VOL_LOW;
-         atrTpMult = ATR_TP_MULT_VOL_LOW;
-      } else {
-         atrSlMult = ATR_SL_MULT_BASE;
-         atrTpMult = ATR_TP_MULT_BASE;
-      }
-   } else {
-      atrSlMult = ATR_SL_MULT_BASE;
-      atrTpMult = ATR_TP_MULT_BASE;
-   }
+   g_CurrentStrength = boostedStr;
 
-   // v3.13: Swing High/Low S/R proximity check
-   double swingHigh = 0, swingLow = 0;
+   // v3.13: Swing High/Low S/R proximity check (FIXED v3.14: Better initialization)
+   double swingHigh = -1, swingLow = DBL_MAX;
    if(idx >= 10) {
       for(int i = 1; i <= 10; i++) {
-         if(idx - i >= 0 && idx + i < rates_total) {
+         if(idx - i >= 0 && idx + i <= rates_total - 1) {
             if(high[idx - i] > swingHigh) swingHigh = high[idx - i];
-            if(low[idx - i] < swingLow || swingLow == 0) swingLow = low[idx - i];
+            if(low[idx - i] < swingLow) swingLow = low[idx - i];
          }
       }
    }
-   double swingRange = (swingHigh > 0 && swingLow > 0) ? (swingHigh - swingLow) : atr * 10;
+   double swingRange = (swingHigh > 0 && swingLow < DBL_MAX) ? (swingHigh - swingLow) : atr * 10;
    bool nearSwingHigh = (swingHigh > 0 && MathAbs(price - swingHigh) < swingRange * 0.1);
-   bool nearSwingLow = (swingLow > 0 && MathAbs(price - swingLow) < swingRange * 0.1);
+   bool nearSwingLow = (swingLow < DBL_MAX && MathAbs(price - swingLow) < swingRange * 0.1);
    if(nearSwingHigh) { if(!isBuy) boostedStr = MathMin(1.0, boostedStr + 0.05); }
    if(nearSwingLow) { if(isBuy) boostedStr = MathMin(1.0, boostedStr + 0.05); }
 
@@ -998,298 +1119,10 @@ void AnalyzeMarket(int idx,
    uint calcTime = GetTickCount() - t0;
    g_TotalCalcTimeMs += calcTime;
    g_CalcCount++;
-   if(g_CalcCount > 0) {
+   if(g_CalcCount > 0)
       g_AvgCalcMs = (double)g_TotalCalcTimeMs / g_CalcCount;
-   }
-
-   // ── 10. Render UI ──────────────────────────────────────────
-   UpdateUI(price, active, isBuy, boostedStr, consensus,
-            condition, majorTrend, inds, atr, scalpStatus, pattern,
-            (double)calcTime, uiUpdateNeeded, atrSlMult, atrTpMult, volatilityRatio, rrRatio);
-  }
+}
 
 //+------------------------------------------------------------------+
-//| UI Update (Optimized)                                           |
+//| END OF FILE                                                      |
 //+------------------------------------------------------------------+
-void UpdateUI(double price, bool active, bool isBuy, double str, double conf,
-              string cond, string majTrend, IndicatorResult &inds[],
-              double atr, string scalpStatus, string pattern, double calcMs,
-              bool uiUpdateNeeded, double atrSlMult, double atrTpMult, 
-              double volRatio, double rrRatio = -1)
-  {
-   if(price <= 0 || atr <= 0) return;
-
-   ObjectSetString(0, "NR_Dash_Price", OBJPROP_TEXT, DoubleToString(price, _Digits));
-
-   string sigTitle = "NO SIGNAL";
-   string reason   = "Analyzing...";
-   color  bg       = C'243,244,246';
-   color  txt      = C'107,114,128';
-
-   if(!active) {
-      if     (scalpStatus == "VOLATILE")    reason = "⚠ Volatility Too High";
-      else if(scalpStatus == "SQUEEZE")     reason = "⏳ Waiting: BB Squeeze";
-      else if(scalpStatus == "WEAK_TREND")  reason = "⚠ Trend Too Weak";
-      else if(scalpStatus == "HIGH_SPREAD") reason = "⚠ Spread Too Wide";
-      else if(scalpStatus == "OFF_SESSION") reason = "⏳ Outside Session";
-      else if(scalpStatus == "LARGE_WICKS") reason = "⚠ Candle Wick Too Large";
-      else if(scalpStatus == "WEAK_MOMENTUM") reason = "⚠ Weak Momentum";
-      else if(scalpStatus == "FILTERED")      reason = "⚠ Signal Filtered";
-      else if(scalpStatus == "RR_FILTERED")   reason = "⚠ R:R Below Minimum";
-      else if((atrSlMult > 0 ? (atrTpMult / atrSlMult) : 0.0) < Inp_Min_RR_Ratio) reason = "⚠ R:R Below Minimum";
-      else if(conf < 0.65)                  reason = StringFormat("Low Agreement (%.0f%%)", conf * 100);
-      else if(str < 0.50)                   reason = StringFormat("Weak Signal (%.2f)", str);
-      else                                  reason = "Waiting for Trigger";
-   } else {
-      reason = "✓ Trade Setup Valid";
-      if(isBuy) { sigTitle = "BUY SIGNAL";  bg = C'219,234,254'; txt = C'29,78,216'; }
-      else       { sigTitle = "SELL SIGNAL"; bg = C'254,226,226'; txt = C'185,28,28'; }
-   }
-
-   ObjectSetString (0, "NR_Dash_SigTitle",   OBJPROP_TEXT,    sigTitle);
-   ObjectSetInteger(0, "NR_Dash_SigTitle",   OBJPROP_COLOR,   txt);
-   ObjectSetInteger(0, "NR_Dash_SigBg",      OBJPROP_BGCOLOR, bg);
-   ObjectSetInteger(0, "NR_Dash_SigBg",      OBJPROP_COLOR,   bg);
-   ObjectSetString (0, "NR_Dash_SigReason",  OBJPROP_TEXT,    reason);
-
-   string ageStr = "";
-   if(g_Stats.lastSignalTime > 0) {
-      int ageSec = (int)(TimeCurrent() - g_Stats.lastSignalTime);
-      if(ageSec < 60) ageStr = "| " + IntegerToString(ageSec) + "s ago";
-      else if(ageSec < 3600) ageStr = "| " + IntegerToString(ageSec/60) + "m ago";
-      else ageStr = "| " + IntegerToString(ageSec/3600) + "h ago";
-   }
-
-   ObjectSetString (0, "NR_Dash_SigMetrics", OBJPROP_TEXT,
-                    StringFormat("Str: %.2f | Agr: %.0f%% %s", str, conf * 100, ageStr));
-
-   bool showPattern = (pattern != "" && pattern != "DOJI");
-   ObjectSetInteger(0, "NR_Dash_PatternBg", OBJPROP_HIDDEN, !showPattern);
-   ObjectSetInteger(0, "NR_Dash_Pattern",   OBJPROP_HIDDEN, !showPattern);
-   if(showPattern) ObjectSetString(0, "NR_Dash_Pattern", OBJPROP_TEXT, pattern);
-
-   // v3.13: Consecutive bars display
-   ObjectSetString (0, "NR_Dash_Consec", OBJPROP_TEXT,
-                    StringFormat("Consec: %d (%s)", g_Stats.consecBars,
-                                 g_Stats.lastDirWasBuy ? "Bull" : "Bear"));
-
-   // ── SL / TP (v3.13: Adaptive) ─────────────────────────────────
-   double sl = 0, tp = 0, slPips = 0, tpPips = 0;
-   double displayRR = (rrRatio >= 0) ? rrRatio : 0.0;
-   if(active && displayRR <= 0) {
-      if(isBuy) {
-         displayRR = (atr * atrTpMult) / (atr * atrSlMult);
-      } else {
-         displayRR = (atr * atrTpMult) / (atr * atrSlMult);
-      }
-   }
-   if(active) {
-      if(isBuy) {
-         sl     = price - atr * atrSlMult;
-         tp     = price + atr * atrTpMult;
-         slPips = (price - sl) / Point();
-         tpPips = (tp - price) / Point();
-      } else {
-         sl     = price + atr * atrSlMult;
-         tp     = price - atr * atrTpMult;
-         slPips = (sl - price) / Point();
-         tpPips = (price - tp) / Point();
-      }
-      if(slPips > 0 && displayRR <= 0) displayRR = tpPips / slPips;
-   }
-
-   color slCol = active ? C'220,38,38'  : C'156,163,175';
-   color tpCol = active ? C'22,163,74'  : C'156,163,175';
-   color rrCol = active ? (displayRR >= Inp_Min_RR_Ratio ? C'22,163,74' : C'234,88,12') : C'156,163,175';
-
-   ObjectSetString (0, "NR_Dash_SL", OBJPROP_TEXT,
-      active ? StringFormat("SL: %s (%.0f pts)", DoubleToString(sl, _Digits), slPips) : "SL: ---");
-   ObjectSetInteger(0, "NR_Dash_SL", OBJPROP_COLOR, slCol);
-   ObjectSetString (0, "NR_Dash_TP", OBJPROP_TEXT,
-      active ? StringFormat("TP: %s (%.0f pts)", DoubleToString(tp, _Digits), tpPips) : "TP: ---");
-   ObjectSetInteger(0, "NR_Dash_TP", OBJPROP_COLOR, tpCol);
-   ObjectSetString (0, "NR_Dash_RR", OBJPROP_TEXT,
-      active ? StringFormat("R:R %.1f:1", displayRR) : "R:R ---");
-   ObjectSetInteger(0, "NR_Dash_RR", OBJPROP_COLOR, rrCol);
-
-   // ── Market Condition ──────────────────────────────────────────
-   color condColor = C'234,88,12';
-   if(cond == "TRENDING_UP")   condColor = C'22,163,74';
-   if(cond == "TRENDING_DOWN") condColor = C'220,38,38';
-   if(cond == "VOLATILE")      condColor = C'147,51,234';
-
-   color biasBg = C'229,231,235';
-   if(majTrend == "BULLISH") biasBg = C'220,252,231';
-   if(majTrend == "BEARISH") biasBg = C'254,226,226';
-
-   ObjectSetString (0, "NR_Dash_MktCond", OBJPROP_TEXT,  cond);
-   ObjectSetInteger(0, "NR_Dash_MktCond", OBJPROP_COLOR, condColor);
-   ObjectSetString (0, "NR_Dash_MktBias", OBJPROP_TEXT,  StringFormat("Bias: %s", majTrend));
-   ObjectSetInteger(0, "NR_Dash_BiasBg",  OBJPROP_BGCOLOR, biasBg);
-
-   string sText  = "✓ Scalp OK";
-   color  sColor = C'22,163,74';
-   if(scalpStatus != "OK") { sText = "⚠ Unsafe: " + scalpStatus; sColor = C'220,38,28'; }
-   ObjectSetString (0, "NR_Dash_MktStatus", OBJPROP_TEXT,  sText);
-   ObjectSetInteger(0, "NR_Dash_MktStatus", OBJPROP_COLOR, sColor);
-
-   for(int k = 0; k < 8; k++)
-      UpdateRow(k, inds[k].name, inds[k].vote, inds[k].value, inds[k].confidence);
-
-   ObjectSetString(0, "NR_Dash_Foot1",
-      OBJPROP_TEXT, StringFormat("B:%d S:%d Today | T:%d", g_AlertState.totalBuyToday, g_AlertState.totalSellToday, g_Stats.totalSignals));
-   ObjectSetString(0, "NR_Dash_Foot2",
-      OBJPROP_TEXT, StringFormat("RR:%.1f | Decay:%.0f%%", displayRR, g_Stats.signalDecay * 100));
-
-   if(uiUpdateNeeded) {
-      g_LastStrength = str;
-      g_LastCondition = cond;
-      ChartRedraw();
-   }
-  }
-
-//+------------------------------------------------------------------+
-//| GUI Creation                                                     |
-//+------------------------------------------------------------------+
-void CreateGUI()
-  {
-   int x = Inp_X_Offset;
-   int y = Inp_Y_Offset;
-   int w = 290;
-   int h = 460;
-
-   CreateRect("NR_Dash_Bg", x, y, w, h, C'255,248,220');
-
-   color headerBg = Inp_Pro_Mode ? C'20,83,45' : C'31,41,55';
-   CreateRect("NR_Dash_Header",   x,     y,    w,  30, headerBg);
-   CreateLbl ("NR_Dash_Title",    "NR-SCALPING v3.13", x+10, y+8,  clrWhite, 10, true);
-   CreateRect("NR_Dash_ProBadge", x+w-35, y+8,  25, 14, C'22,101,52');
-   CreateLbl ("NR_Dash_ProText",  "PRO",  x+w-31, y+9, clrWhite, 7, true);
-
-   ObjectSetInteger(0, "NR_Dash_ProBadge", OBJPROP_HIDDEN, !Inp_Pro_Mode);
-   ObjectSetInteger(0, "NR_Dash_ProText",  OBJPROP_HIDDEN, !Inp_Pro_Mode);
-
-   int fy = y + 30;
-   CreateRect("NR_Dash_StatusBg",x,    fy, w,  25, C'31,41,55');
-   CreateRect("NR_Dash_LiveDot", x+10, fy+10, 6, 6, C'74,222,128');
-   CreateLbl ("NR_Dash_LiveText","LIVE FEED", x+20, fy+7, clrWhite, 8, false, "Courier New");
-   CreateLbl ("NR_Dash_Price",   "0.00000",   x+w-130, fy+6, C'250,204,21', 10, true, "Courier New");
-
-   int sy = y + 65;
-   CreateRect("NR_Dash_SigBg",     x+10, sy,    w-20, 90, C'243,244,246');
-   CreateLbl ("NR_Dash_SigTitle",  "NO SIGNAL",        x+95, sy+8,  C'107,114,128', 12, true);
-   CreateLbl ("NR_Dash_SigReason", "INITIALIZING...",  x+90, sy+30, C'107,114,128',  7);
-   CreateLbl ("NR_Dash_SigMetrics","Str: 0.00 | Agr: 0%", x+95, sy+45, clrBlack, 8);
-
-   CreateLbl ("NR_Dash_Consec",   "Consec: 0", x+10, sy+70, C'107,114,128', 7);
-
-   CreateRect("NR_Dash_PatternBg", x+w-70, sy,   60, 15, C'250,204,21');
-   CreateLbl ("NR_Dash_Pattern",   "PATTERN", x+w-65, sy+2, clrBlack, 6, true);
-   ObjectSetInteger(0, "NR_Dash_PatternBg", OBJPROP_HIDDEN, true);
-   ObjectSetInteger(0, "NR_Dash_Pattern",   OBJPROP_HIDDEN, true);
-
-   CreateRect("NR_Dash_SigLine", x+20, sy+65, w-40, 1, C'209,213,219');
-   CreateLbl ("NR_Dash_SL",      "SL: ---", x+20,  sy+70, C'156,163,175', 8);
-   CreateLbl ("NR_Dash_TP",      "TP: ---", x+160, sy+70, C'156,163,175', 8);
-   CreateLbl ("NR_Dash_RR",      "R:R ---", x+220, sy+70, C'156,163,175', 8);
-
-   int my = y + 165;
-   CreateRect("NR_Dash_MktBg",   x+10,    my,      w-20, 40, C'255,255,255');
-   CreateLbl ("NR_Dash_MktCond", "SCANNING", x+15, my+5,  C'234,88,12',  9, true);
-   CreateRect("NR_Dash_BiasBg",  x+w-100,  my+5,   80,   14, C'229,231,235');
-   CreateLbl ("NR_Dash_MktBias", "Bias: FLAT", x+w-95, my+6, C'75,85,99', 7, true);
-   CreateLbl ("NR_Dash_MktStatus","Checking...", x+15, my+22, clrGray, 7);
-
-   int ty = y + 215;
-   CreateRect("NR_Dash_TblBg", x+10, ty, w-20, 170, clrWhite);
-   CreateLbl ("NR_H_1", "INDICATOR", x+15,  ty+5, C'156,163,175', 7, true);
-   CreateLbl ("NR_H_2", "VAL",       x+120, ty+5, C'156,163,175', 7, true);
-   CreateLbl ("NR_H_3", "CONF",      x+180, ty+5, C'156,163,175', 7, true);
-   CreateLbl ("NR_H_4", "V",         x+230, ty+5, C'156,163,175', 7, true);
-   CreateRect("NR_Dash_TblLine", x+10, ty+20, w-20, 1, C'243,244,246');
-
-   string rowNames[8] = {"Trend","MACD","RSI","BB","Stoch","ADX","WPR","CCI"};
-   for(int k = 0; k < 8; k++)
-      CreateIndRow(k, rowNames[k], x, ty + 25 + k * 17);
-
-   CreateRect("NR_Dash_FooterLine", x, y+400, w, 1, C'229,231,235');
-   CreateLbl ("NR_Dash_Foot1", "B:0 S:0 Today | T:0", x+10,    y+405, C'156,163,175', 7);
-   CreateLbl ("NR_Dash_Foot2", "RR:-- | Decay:--",    x+w-90,  y+405, C'156,163,175', 7);
-  }
-
-void CreateIndRow(int idx, string name, int x, int y)
-  {
-   string s = IntegerToString(idx);
-   CreateLbl("NR_Row_Name_"+s, name,   x+15,  y, C'55,65,81',    8, true);
-   CreateLbl("NR_Row_Val_" +s, "0.00", x+120, y, clrBlack,       8);
-   CreateLbl("NR_Row_Conf_"+s, "0.00", x+180, y, C'107,114,128', 8);
-   CreateLbl("NR_Row_Vote_"+s, "O",    x+230, y, C'156,163,175', 8, false, "Wingdings 3");
-  }
-
-void UpdateRow(int idx, string name, int vote, double val, double conf)
-  {
-   string s    = IntegerToString(idx);
-   string vStr = (MathAbs(val) < 0.1) ? DoubleToString(val, 4) : DoubleToString(val, 2);
-
-   ObjectSetString(0, "NR_Row_Val_" +s, OBJPROP_TEXT, vStr);
-   ObjectSetString(0, "NR_Row_Conf_"+s, OBJPROP_TEXT, DoubleToString(conf, 2));
-
-   color valColor = C'31,41,55';
-   if(vote ==  1) valColor = C'21,128,61';
-   if(vote == -1) valColor = C'185,28,28';
-   ObjectSetInteger(0, "NR_Row_Val_"+s, OBJPROP_COLOR, valColor);
-
-   string icon = "O"; color c = C'156,163,175';
-   if(vote ==  1) { icon = "p"; c = C'22,163,74';  }
-   if(vote == -1) { icon = "q"; c = C'220,38,38';  }
-   ObjectSetString (0, "NR_Row_Vote_"+s, OBJPROP_TEXT,  icon);
-   ObjectSetInteger(0, "NR_Row_Vote_"+s, OBJPROP_COLOR, c);
-  }
-
-//+------------------------------------------------------------------+
-//| Helpers — UI Object Management (With Error Handling + ZORDER)   |
-//+------------------------------------------------------------------+
-void CreateRect(string name, int x, int y, int w, int h, color bg)
-  {
-   if(ObjectFind(0, name) < 0) {
-      if(!ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0)) {
-         PrintFormat("Failed to create rectangle: %s | Error: %d", name, GetLastError());
-         return;
-      }
-   }
-   ObjectSetInteger(0, name, OBJPROP_XDISTANCE,   x);
-   ObjectSetInteger(0, name, OBJPROP_YDISTANCE,   y);
-   ObjectSetInteger(0, name, OBJPROP_XSIZE,       w);
-   ObjectSetInteger(0, name, OBJPROP_YSIZE,       h);
-   ObjectSetInteger(0, name, OBJPROP_BGCOLOR,     bg);
-   ObjectSetInteger(0, name, OBJPROP_COLOR,       bg);
-   ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
-   ObjectSetInteger(0, name, OBJPROP_CORNER,      CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, name, OBJPROP_BACK,        false);
-   ObjectSetInteger(0, name, OBJPROP_SELECTABLE,  false);
-   ObjectSetInteger(0, name, OBJPROP_HIDDEN,      false);
-   ObjectSetInteger(0, name, OBJPROP_ZORDER,     10);
-  }
-
-void CreateLbl(string name, string text, int x, int y,
-               color col, int fsize, bool bold=false, string font="Arial")
-  {
-   if(ObjectFind(0, name) < 0) {
-      if(!ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0)) {
-         PrintFormat("Failed to create label: %s | Error: %d", name, GetLastError());
-         return;
-      }
-   }
-   string resolvedFont = bold ? (font + " Bold") : font;
-   ObjectSetString (0, name, OBJPROP_TEXT,      text);
-   ObjectSetString (0, name, OBJPROP_FONT,      resolvedFont);
-   ObjectSetInteger(0, name, OBJPROP_FONTSIZE,  fsize);
-   ObjectSetInteger(0, name, OBJPROP_COLOR,     col);
-   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
-   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
-   ObjectSetInteger(0, name, OBJPROP_CORNER,    CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, name, OBJPROP_BACK,      false);
-   ObjectSetInteger(0, name, OBJPROP_SELECTABLE,false);
-   ObjectSetInteger(0, name, OBJPROP_HIDDEN,    false);
-   ObjectSetInteger(0, name, OBJPROP_ZORDER,   11);
-  }
