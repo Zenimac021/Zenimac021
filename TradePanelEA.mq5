@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
 //|                                              TradePanelEA.mq5    |
-//|                        Copyright 2023, Enhanced Version 4.2      |
-//|          Trend Confirmation & Signal System (Debugged + Enhanced)|
+//|                      Copyright 2025, GoldScalp v8.0             |
+//|        Trend Confirmation & Signal System (Debugged + Enhanced) |
 //+------------------------------------------------------------------+
 #property strict
-#property description "Trade Panel with Trend Confirmation & Signals v4.2"
-#property description "Fixed: Memory leaks, indicator handle management, null checks, race conditions"
-#property description "Enhanced: News filter, ATR SL/TP, Pending Orders, Journal, pending order support"
+#property description "GoldScalp v8.0 – Trade Panel with Trend Confirmation & Signals"
+#property description "Fixed: ATR SL/TP bounds, CalculateBuyStrength, buffer retry, RSI divergence"
+#property description "Enhanced: Multi-timeframe filter, RSI divergence, Sharpe Ratio, scored signals"
 
 // Input parameters
 input group "=== Trading Settings ==="
@@ -71,6 +71,8 @@ input int ATR_Period = 14;                    // ATR period
 input ENUM_TIMEFRAMES ATR_Timeframe = PERIOD_H1; // ATR timeframe
 input double ATR_SL_Multiplier = 1.5;         // ATR SL multiplier
 input double ATR_TP_Multiplier = 3.0;         // ATR TP multiplier
+input int ATR_MinSLPoints = 50;               // ATR minimum SL points (0 = no minimum)
+input int ATR_MaxSLPoints = 500;              // ATR maximum SL points (0 = no maximum)
 
 input group "=== Market Filter Settings ==="
 input bool UseMarketHoursFilter = false;       // Filter by market session
@@ -82,6 +84,14 @@ input bool UseNewsFilter = false;             // Skip trading near major news
 input int NewsMinutesBefore = 30;              // Minutes before news to block
 input int NewsMinutesAfter = 30;               // Minutes after news to block
 input int MaxConsecutiveLosses = 0;            // Max consecutive losses before pause (0=off)
+
+input group "=== Multi-Timeframe Settings ==="
+input bool UseMultiTimeframe = false;          // Use multi-timeframe trend confirmation
+input ENUM_TIMEFRAMES MTF_Timeframe = PERIOD_H1; // Higher timeframe for confirmation
+
+input group "=== RSI Divergence Settings ==="
+input bool UseRSIDivergence = false;           // Use RSI divergence as additional signal
+input int DivergenceLookback = 20;             // Bars to look back for swing points
 
 input group "=== Partial Close Settings ==="
 input double PartialClosePercent = 50.0;       // Percentage for partial close (0-100)
@@ -124,6 +134,13 @@ int maFastHandle = INVALID_HANDLE, maSlowHandle = INVALID_HANDLE, maTrendHandle 
 int adxHandle = INVALID_HANDLE, rsiHandle = INVALID_HANDLE, macdHandle = INVALID_HANDLE, bbHandle = INVALID_HANDLE;
 int atrHandle = INVALID_HANDLE;
 
+// Multi-timeframe confirmation handles and buffers
+int mtfMaFastHandle = INVALID_HANDLE, mtfMaSlowHandle = INVALID_HANDLE;
+double mtfMaFast[], mtfMaSlow[];
+
+// Performance tracking
+double SharpeRatio = 0.0;
+
 // Signal states
 enum ENUM_TREND_DIRECTION
 {
@@ -141,12 +158,21 @@ enum ENUM_SIGNAL_STRENGTH
     SIGNAL_VERY_STRONG
 };
 
+enum ENUM_DIVERGENCE_TYPE
+{
+    DIV_NONE,
+    DIV_BULLISH,   // Price lower low + RSI higher low  → buy divergence
+    DIV_BEARISH    // Price higher high + RSI lower high → sell divergence
+};
+
 // Current market analysis
 struct MarketAnalysis
 {
     ENUM_TREND_DIRECTION trend;
+    ENUM_TREND_DIRECTION mtfTrend;       // Higher-timeframe trend for MTF filter
     ENUM_SIGNAL_STRENGTH buyStrength;
     ENUM_SIGNAL_STRENGTH sellStrength;
+    ENUM_DIVERGENCE_TYPE divergence;     // Current RSI divergence type
     double trendStrength;
     bool buySignal;
     bool sellSignal;
@@ -184,6 +210,12 @@ int OnInit()
     if(RiskPercent < 0 || RiskPercent > 100)
     {
         Print("ERROR: RiskPercent must be between 0 and 100");
+        return(INIT_PARAMETERS_INCORRECT);
+    }
+    // Validate ATR SL/TP bounds (both 0 means no clamping, which is valid)
+    if(ATR_MinSLPoints > 0 && ATR_MaxSLPoints > 0 && ATR_MinSLPoints > ATR_MaxSLPoints)
+    {
+        Print("ERROR: ATR_MinSLPoints (", ATR_MinSLPoints, ") must be <= ATR_MaxSLPoints (", ATR_MaxSLPoints, ")");
         return(INIT_PARAMETERS_INCORRECT);
     }
     
@@ -241,7 +273,7 @@ int OnInit()
     }
     
     PanelCreated = true;
-    Print("Trade Panel v4.2 initialized successfully with Trend Confirmation & Enhanced Features");
+    Print("GoldScalp v8.0 initialized successfully with Trend Confirmation, MTF & Enhanced Features");
     return(INIT_SUCCEEDED);
 }
 
@@ -352,6 +384,26 @@ bool InitializeIndicators()
     else
         atrHandle = INVALID_HANDLE;
     
+    // Multi-timeframe MAs (optional)
+    if(UseMultiTimeframe)
+    {
+        mtfMaFastHandle = iMA(Symbol(), MTF_Timeframe, MA_Fast, 0, MODE_EMA, PRICE_CLOSE);
+        if(mtfMaFastHandle == INVALID_HANDLE)
+            Print("Warning: Failed to create MTF Fast MA handle. Error: ", GetLastError());
+        
+        mtfMaSlowHandle = iMA(Symbol(), MTF_Timeframe, MA_Slow, 0, MODE_EMA, PRICE_CLOSE);
+        if(mtfMaSlowHandle == INVALID_HANDLE)
+            Print("Warning: Failed to create MTF Slow MA handle. Error: ", GetLastError());
+        
+        ArraySetAsSeries(mtfMaFast, true);
+        ArraySetAsSeries(mtfMaSlow, true);
+    }
+    else
+    {
+        mtfMaFastHandle = INVALID_HANDLE;
+        mtfMaSlowHandle = INVALID_HANDLE;
+    }
+    
     // Set arrays as series
     ArraySetAsSeries(maFast, true);
     ArraySetAsSeries(maSlow, true);
@@ -384,6 +436,8 @@ void CleanupIndicatorHandles()
     if(macdHandle != INVALID_HANDLE) { IndicatorRelease(macdHandle); macdHandle = INVALID_HANDLE; }
     if(bbHandle != INVALID_HANDLE) { IndicatorRelease(bbHandle); bbHandle = INVALID_HANDLE; }
     if(atrHandle != INVALID_HANDLE) { IndicatorRelease(atrHandle); atrHandle = INVALID_HANDLE; }
+    if(mtfMaFastHandle != INVALID_HANDLE) { IndicatorRelease(mtfMaFastHandle); mtfMaFastHandle = INVALID_HANDLE; }
+    if(mtfMaSlowHandle != INVALID_HANDLE) { IndicatorRelease(mtfMaSlowHandle); mtfMaSlowHandle = INVALID_HANDLE; }
 }
 
 //+------------------------------------------------------------------+
@@ -540,24 +594,32 @@ void AnalyzeMarket()
     // Store previous analysis
     previousAnalysis = currentAnalysis;
     
-    // Copy indicator buffers with proper error checking
+    // Copy indicator buffers with retry logic (handles slow indicator warm-up)
     bool buffersCopied = true;
+    int retries = 2;
     
-    if(CopyBuffer(maFastHandle, 0, 0, 3, maFast) < 3) buffersCopied = false;
-    if(CopyBuffer(maSlowHandle, 0, 0, 3, maSlow) < 3) buffersCopied = false;
-    if(CopyBuffer(maTrendHandle, 0, 0, 3, maTrend) < 3) buffersCopied = false;
-    if(CopyBuffer(adxHandle, 0, 0, 3, adx) < 3) buffersCopied = false;
-    if(CopyBuffer(adxHandle, 1, 0, 3, adxPlus) < 3) buffersCopied = false;
-    if(CopyBuffer(adxHandle, 2, 0, 3, adxMinus) < 3) buffersCopied = false;
-    if(CopyBuffer(rsiHandle, 0, 0, 3, rsi) < 3) buffersCopied = false;
-    if(CopyBuffer(macdHandle, 0, 0, 3, macdMain) < 3) buffersCopied = false;
-    if(CopyBuffer(macdHandle, 1, 0, 3, macdSignal) < 3) buffersCopied = false;
+    for(int attempt = 0; attempt <= retries; attempt++)
+    {
+        buffersCopied = true;
+        if(CopyBuffer(maFastHandle, 0, 0, 3, maFast) < 3)   { buffersCopied = false; }
+        if(CopyBuffer(maSlowHandle, 0, 0, 3, maSlow) < 3)   { buffersCopied = false; }
+        if(CopyBuffer(maTrendHandle, 0, 0, 3, maTrend) < 3) { buffersCopied = false; }
+        if(CopyBuffer(adxHandle, 0, 0, 3, adx) < 3)         { buffersCopied = false; }
+        if(CopyBuffer(adxHandle, 1, 0, 3, adxPlus) < 3)     { buffersCopied = false; }
+        if(CopyBuffer(adxHandle, 2, 0, 3, adxMinus) < 3)    { buffersCopied = false; }
+        if(CopyBuffer(rsiHandle, 0, 0, 3, rsi) < 3)         { buffersCopied = false; }
+        if(CopyBuffer(macdHandle, 0, 0, 3, macdMain) < 3)   { buffersCopied = false; }
+        if(CopyBuffer(macdHandle, 1, 0, 3, macdSignal) < 3) { buffersCopied = false; }
+        
+        if(buffersCopied || attempt == retries) break;
+        Sleep(50); // Brief pause before retry
+    }
     
     if(UseBollingerBands && bbHandle != INVALID_HANDLE)
     {
-        if(CopyBuffer(bbHandle, 1, 0, 3, bbUpper) < 3) buffersCopied = false;
+        if(CopyBuffer(bbHandle, 1, 0, 3, bbUpper) < 3)  buffersCopied = false;
         if(CopyBuffer(bbHandle, 0, 0, 3, bbMiddle) < 3) buffersCopied = false;
-        if(CopyBuffer(bbHandle, 2, 0, 3, bbLower) < 3) buffersCopied = false;
+        if(CopyBuffer(bbHandle, 2, 0, 3, bbLower) < 3)  buffersCopied = false;
     }
     
     if(UseATRforSLTP && atrHandle != INVALID_HANDLE)
@@ -568,11 +630,13 @@ void AnalyzeMarket()
     if(!buffersCopied)
     {
         currentAnalysis.trend = TREND_UNKNOWN;
+        currentAnalysis.mtfTrend = TREND_UNKNOWN;
         currentAnalysis.trendStrength = 0;
         currentAnalysis.buySignal = false;
         currentAnalysis.sellSignal = false;
         currentAnalysis.buyStrength = SIGNAL_WEAK;
         currentAnalysis.sellStrength = SIGNAL_WEAK;
+        currentAnalysis.divergence = DIV_NONE;
         currentAnalysis.recommendation = "No Data";
         return;
     }
@@ -583,7 +647,7 @@ void AnalyzeMarket()
     currentAnalysis.adxValue = adx[0];
     currentAnalysis.adxPlusValue = adxPlus[0];
     currentAnalysis.adxMinusValue = adxMinus[0];
-    currentAnalysis.atrValue = (UseATRforSLTP && atrBuffer[0] != EMPTY_VALUE) ? atrBuffer[0] : 0;
+    currentAnalysis.atrValue = (UseATRforSLTP && ArraySize(atrBuffer) >= 3 && atrBuffer[0] != EMPTY_VALUE) ? atrBuffer[0] : 0;
     
     // Apply market filters
     currentAnalysis.marketOpen = IsMarketOpen();
@@ -593,6 +657,12 @@ void AnalyzeMarket()
     // Determine trend
     currentAnalysis.trend = DetermineTrend();
     currentAnalysis.trendStrength = UseADX ? currentAnalysis.adxValue : CalculateTrendStrength();
+    
+    // Multi-timeframe trend
+    currentAnalysis.mtfTrend = DetermineMTFTrend();
+    
+    // RSI divergence
+    currentAnalysis.divergence = UseRSIDivergence ? DetectRSIDivergence() : DIV_NONE;
     
     // Generate signals
     currentAnalysis.buySignal = GenerateBuySignal();
@@ -760,13 +830,25 @@ double CalculateTrendStrength()
 //+------------------------------------------------------------------+
 bool GenerateBuySignal()
 {
-    // Check for buy conditions
-    if(currentAnalysis.trend == TREND_UP && 
-       currentAnalysis.macdValue > 0 && 
-       currentAnalysis.rsiValue < 70)
-        return true;
+    // Base condition: uptrend with MACD momentum and RSI not overbought
+    if(currentAnalysis.trend != TREND_UP)
+    {
+        // Allow divergence-based buy even in sideways/unknown trend
+        if(UseRSIDivergence && currentAnalysis.divergence == DIV_BULLISH)
+        {
+            // Still require MACD not strongly bearish
+            if(currentAnalysis.macdValue >= 0) return true;
+        }
+        return false;
+    }
     
-    return false;
+    if(currentAnalysis.macdValue <= 0) return false;
+    if(currentAnalysis.rsiValue >= 70) return false;
+    
+    // Multi-timeframe filter: higher-timeframe trend must agree or be neutral
+    if(UseMultiTimeframe && currentAnalysis.mtfTrend == TREND_DOWN) return false;
+    
+    return true;
 }
 
 //+------------------------------------------------------------------+
@@ -774,13 +856,24 @@ bool GenerateBuySignal()
 //+------------------------------------------------------------------+
 bool GenerateSellSignal()
 {
-    // Check for sell conditions
-    if(currentAnalysis.trend == TREND_DOWN && 
-       currentAnalysis.macdValue < 0 && 
-       currentAnalysis.rsiValue > 30)
-        return true;
+    // Base condition: downtrend with MACD momentum and RSI not oversold
+    if(currentAnalysis.trend != TREND_DOWN)
+    {
+        // Allow divergence-based sell even in sideways/unknown trend
+        if(UseRSIDivergence && currentAnalysis.divergence == DIV_BEARISH)
+        {
+            if(currentAnalysis.macdValue <= 0) return true;
+        }
+        return false;
+    }
     
-    return false;
+    if(currentAnalysis.macdValue >= 0) return false;
+    if(currentAnalysis.rsiValue <= 30) return false;
+    
+    // Multi-timeframe filter: higher-timeframe trend must agree or be neutral
+    if(UseMultiTimeframe && currentAnalysis.mtfTrend == TREND_UP) return false;
+    
+    return true;
 }
 
 //+------------------------------------------------------------------+
@@ -788,26 +881,62 @@ bool GenerateSellSignal()
 //+------------------------------------------------------------------+
 ENUM_SIGNAL_STRENGTH CalculateBuyStrength()
 {
-    double strength = 0;
-    
-    // Calculate buy signal strength based on indicators
-    if(currentAnalysis.macdValue > 0)
-        strength += 20;
-    if(currentAnalysis.rsiValue < 70)
-        strength += 20;
-    if(currentAnalysis.adxPlusValue > currentAnalysis.adxMinusValue)
-        strength += 20;
-    if(currentAnalysis.trend == TREND_UP)
-        strength += 40;
-    
-    if(strength >= 90)
-        return SIGNAL_VERY_STRONG;
-    else if(strength >= 70)
-        return SIGNAL_STRONG;
-    else if(strength >= 50)
-        return SIGNAL_MODERATE;
-    else
+    if(!currentAnalysis.buySignal)
         return SIGNAL_WEAK;
+    
+    if(ArraySize(rsi) < 3 || ArraySize(macdMain) < 3 || ArraySize(macdSignal) < 3 || ArraySize(maFast) < 3 || ArraySize(maSlow) < 3)
+        return SIGNAL_WEAK;
+    
+    int strengthScore = 0;
+    double price = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
+    
+    // Trend alignment (max 3 points)
+    if(currentAnalysis.trend == TREND_UP) strengthScore += 3;
+    else if(currentAnalysis.trend == TREND_SIDEWAYS) strengthScore += 1;
+    
+    // RSI analysis (max 3 points): favour oversold recovery zone
+    if(UseRSI)
+    {
+        if(rsi[0] > RSI_Oversold && rsi[0] < 40) strengthScore += 3; // Oversold reversal
+        else if(rsi[0] >= 40 && rsi[0] < 50) strengthScore += 2;
+        else if(rsi[0] >= 50 && rsi[0] < RSI_Overbought) strengthScore += 1;
+    }
+    
+    // MACD momentum (max 3 points)
+    if(UseMACD)
+    {
+        if(macdMain[0] > macdSignal[0] && macdMain[0] > 0 && macdMain[1] <= macdSignal[1])
+            strengthScore += 3; // Bullish crossover above zero
+        else if(macdMain[0] > macdSignal[0] && macdMain[0] > 0)
+            strengthScore += 2;
+        else if(macdMain[0] > macdSignal[0])
+            strengthScore += 1;
+    }
+    
+    // ADX strength (max 2 points)
+    if(UseADX)
+    {
+        if(adx[0] > ADX_Threshold && adxPlus[0] > adxMinus[0]) strengthScore += 1;
+        if(adx[0] > 40) strengthScore += 1;
+    }
+    
+    // Bollinger Bands (max 2 points)
+    if(UseBollingerBands && bbHandle != INVALID_HANDLE && ArraySize(bbLower) >= 3)
+    {
+        if(price <= bbLower[0]) strengthScore += 2; // Touching lower band
+        else if(price > bbLower[0] && price < bbMiddle[0]) strengthScore += 1;
+    }
+    
+    // RSI divergence bonus (max 1 point)
+    if(UseRSIDivergence && currentAnalysis.divergence == DIV_BULLISH) strengthScore += 1;
+    
+    // MTF confirmation bonus (max 1 point)
+    if(UseMultiTimeframe && currentAnalysis.mtfTrend == TREND_UP) strengthScore += 1;
+    
+    if(strengthScore >= 9) return SIGNAL_VERY_STRONG;
+    if(strengthScore >= 6) return SIGNAL_STRONG;
+    if(strengthScore >= 3) return SIGNAL_MODERATE;
+    return SIGNAL_WEAK;
 }
 
 //+------------------------------------------------------------------+
@@ -1821,7 +1950,7 @@ bool CreateTitleLabel()
     }
     ObjectSetInteger(0, objName, OBJPROP_XDISTANCE, 15);
     ObjectSetInteger(0, objName, OBJPROP_YDISTANCE, 10);
-    ObjectSetString(0, objName, OBJPROP_TEXT, "Trade Panel v4.2 - " + Symbol());
+    ObjectSetString(0, objName, OBJPROP_TEXT, "GoldScalp v8.0 - " + Symbol());
     ObjectSetInteger(0, objName, OBJPROP_COLOR, clrDarkBlue);
     ObjectSetInteger(0, objName, OBJPROP_FONTSIZE, FontSize + 1);
     ObjectSetInteger(0, objName, OBJPROP_CORNER, PanelCorner);
@@ -2522,9 +2651,54 @@ void CalculateRealStatistics()
     if(totalTrades > 0)
         WinRate = NormalizeDouble((double)wins / totalTrades * 100, 1);
     
+    // Calculate Sharpe Ratio (simplified: mean / stddev of per-trade returns)
+    SharpeRatio = 0.0;
+    if(totalTrades >= 2)
+    {
+        // Collect per-trade P&L for variance calculation
+        double tradeReturns[];
+        ArrayResize(tradeReturns, totalTrades);
+        int idx = 0;
+        double sumReturns = 0.0;
+        
+        int totalDealsAll = HistoryDealsTotal();
+        if(totalDealsAll > 500) totalDealsAll = 500;
+        
+        for(int i = 0; i < totalDealsAll && idx < totalTrades; i++)
+        {
+            ulong ticket = HistoryDealGetTicket(i);
+            if(ticket <= 0) continue;
+            if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != MagicNumber) continue;
+            if(HistoryDealGetString(ticket, DEAL_SYMBOL) != Symbol()) continue;
+            
+            ENUM_DEAL_ENTRY entry2 = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket, DEAL_ENTRY);
+            if(entry2 != DEAL_ENTRY_OUT && entry2 != DEAL_ENTRY_INOUT) continue;
+            
+            double p = HistoryDealGetDouble(ticket, DEAL_PROFIT) +
+                       HistoryDealGetDouble(ticket, DEAL_SWAP) +
+                       HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+            tradeReturns[idx] = p;
+            sumReturns += p;
+            idx++;
+        }
+        
+        if(idx >= 2)
+        {
+            double mean = sumReturns / idx;
+            double variance = 0.0;
+            for(int j = 0; j < idx; j++)
+                variance += (tradeReturns[j] - mean) * (tradeReturns[j] - mean);
+            variance /= (idx - 1); // sample variance
+            double stddev = MathSqrt(variance);
+            if(stddev > 0.0)
+                SharpeRatio = NormalizeDouble(mean / stddev, 2);
+        }
+    }
+    
     Print("Statistics calculated from ", totalChecked, " deals - Trades: ", totalTrades, 
           ", Win Rate: ", DoubleToString(WinRate, 1), "%",
-          ", Profit Factor: ", DoubleToString(ProfitFactor, 2));
+          ", Profit Factor: ", DoubleToString(ProfitFactor, 2),
+          ", Sharpe Ratio: ", DoubleToString(SharpeRatio, 2));
     ConsecutiveLosses = 0; // Reset consecutive loss counter on init
 }
 
@@ -2601,6 +2775,16 @@ void GetATRBasedSLTP(double &slPips, double &tpPips)
         double pipValue = GetPipValue();
         slPips = NormalizeDouble((int)(atrValue * ATR_SL_Multiplier / pipValue), 0);
         tpPips = NormalizeDouble((int)(atrValue * ATR_TP_Multiplier / pipValue), 0);
+        
+        // Apply minimum bounds
+        if(ATR_MinSLPoints > 0 && slPips < ATR_MinSLPoints) slPips = ATR_MinSLPoints;
+        if(ATR_MinSLPoints > 0 && tpPips < ATR_MinSLPoints) tpPips = ATR_MinSLPoints;
+        
+        // Apply maximum bounds
+        if(ATR_MaxSLPoints > 0 && slPips > ATR_MaxSLPoints) slPips = ATR_MaxSLPoints;
+        if(ATR_MaxSLPoints > 0 && tpPips > ATR_MaxSLPoints) tpPips = ATR_MaxSLPoints;
+        
+        // Fallback to fixed pips if clamped values are invalid
         if(slPips < 1) slPips = StopLossPips;
         if(tpPips < 1) tpPips = TakeProfitPips;
     }
@@ -2662,6 +2846,12 @@ ENUM_SIGNAL_STRENGTH CalculateSellStrength()
         else if(price > bbMiddle[0] && price < bbUpper[0]) strengthScore += 1;
     }
     
+    // RSI divergence bonus (max 1 point)
+    if(UseRSIDivergence && currentAnalysis.divergence == DIV_BEARISH) strengthScore += 1;
+    
+    // MTF confirmation bonus (max 1 point)
+    if(UseMultiTimeframe && currentAnalysis.mtfTrend == TREND_DOWN) strengthScore += 1;
+    
     if(strengthScore >= 9) return SIGNAL_VERY_STRONG;
     if(strengthScore >= 6) return SIGNAL_STRONG;
     if(strengthScore >= 3) return SIGNAL_MODERATE;
@@ -2705,6 +2895,166 @@ string GenerateRecommendation()
         return "WAIT";
     else
         return "NO TRADE";
+}
+
+//+------------------------------------------------------------------+
+//| Determine multi-timeframe trend                                  |
+//+------------------------------------------------------------------+
+ENUM_TREND_DIRECTION DetermineMTFTrend()
+{
+    if(!UseMultiTimeframe) return TREND_UNKNOWN;
+    if(mtfMaFastHandle == INVALID_HANDLE || mtfMaSlowHandle == INVALID_HANDLE) return TREND_UNKNOWN;
+    
+    if(CopyBuffer(mtfMaFastHandle, 0, 0, 3, mtfMaFast) < 3) return TREND_UNKNOWN;
+    if(CopyBuffer(mtfMaSlowHandle, 0, 0, 3, mtfMaSlow) < 3) return TREND_UNKNOWN;
+    
+    if(mtfMaFast[0] == EMPTY_VALUE || mtfMaSlow[0] == EMPTY_VALUE) return TREND_UNKNOWN;
+    
+    if(mtfMaFast[0] > mtfMaSlow[0] && mtfMaFast[0] > mtfMaFast[1])
+        return TREND_UP;
+    if(mtfMaFast[0] < mtfMaSlow[0] && mtfMaFast[0] < mtfMaFast[1])
+        return TREND_DOWN;
+    
+    return TREND_SIDEWAYS;
+}
+
+//+------------------------------------------------------------------+
+//| Detect RSI divergence using proper swing point tracking         |
+//| Returns DIV_BULLISH (price lower low + RSI higher low)          |
+//|         DIV_BEARISH (price higher high + RSI lower high)        |
+//|         DIV_NONE if no divergence found                         |
+//+------------------------------------------------------------------+
+ENUM_DIVERGENCE_TYPE DetectRSIDivergence()
+{
+    int lookback = MathMax(8, MathMin(DivergenceLookback, 50));
+    int needed   = lookback + 2;
+    
+    // We need price (close) and RSI values
+    double closeArr[];
+    double rsiArr[];
+    ArraySetAsSeries(closeArr, true);
+    ArraySetAsSeries(rsiArr, true);
+    
+    if(CopyClose(Symbol(), TrendTimeframe, 0, needed, closeArr) < needed) return DIV_NONE;
+    if(CopyBuffer(rsiHandle, 0, 0, needed, rsiArr) < needed) return DIV_NONE;
+    
+    // Find the two most recent swing lows (for bullish divergence)
+    // A swing low is a bar where the close is lower than both its neighbours
+    int swingLow1 = -1, swingLow2 = -1; // indices (0 = most recent)
+    for(int i = 1; i < lookback && (swingLow1 < 0 || swingLow2 < 0); i++)
+    {
+        if(closeArr[i] < closeArr[i-1] && closeArr[i] < closeArr[i+1])
+        {
+            if(swingLow1 < 0)
+                swingLow1 = i;
+            else if(swingLow2 < 0)
+                swingLow2 = i;
+        }
+    }
+    
+    // Find the two most recent swing highs (for bearish divergence)
+    int swingHigh1 = -1, swingHigh2 = -1;
+    for(int i = 1; i < lookback && (swingHigh1 < 0 || swingHigh2 < 0); i++)
+    {
+        if(closeArr[i] > closeArr[i-1] && closeArr[i] > closeArr[i+1])
+        {
+            if(swingHigh1 < 0)
+                swingHigh1 = i;
+            else if(swingHigh2 < 0)
+                swingHigh2 = i;
+        }
+    }
+    
+    // Bullish divergence: price makes lower low but RSI makes higher low
+    if(swingLow1 >= 0 && swingLow2 >= 0)
+    {
+        // swingLow1 is more recent than swingLow2
+        bool priceLowerLow = (closeArr[swingLow1] < closeArr[swingLow2]);
+        bool rsiHigherLow  = (rsiArr[swingLow1] > rsiArr[swingLow2]);
+        if(priceLowerLow && rsiHigherLow) return DIV_BULLISH;
+    }
+    
+    // Bearish divergence: price makes higher high but RSI makes lower high
+    if(swingHigh1 >= 0 && swingHigh2 >= 0)
+    {
+        bool priceHigherHigh = (closeArr[swingHigh1] > closeArr[swingHigh2]);
+        bool rsiLowerHigh    = (rsiArr[swingHigh1] < rsiArr[swingHigh2]);
+        if(priceHigherHigh && rsiLowerHigh) return DIV_BEARISH;
+    }
+    
+    return DIV_NONE;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate numeric buy score (0–100) for analytics               |
+//+------------------------------------------------------------------+
+double CalculateBuyScore()
+{
+    if(!currentAnalysis.buySignal) return 0.0;
+    
+    double score = 0.0;
+    
+    // Trend component (40 pts max)
+    if(currentAnalysis.trend == TREND_UP)
+    {
+        score += 20.0;
+        if(UseADX && currentAnalysis.adxValue > ADX_Threshold) score += 10.0;
+        if(UseADX && currentAnalysis.adxPlusValue > currentAnalysis.adxMinusValue) score += 10.0;
+    }
+    
+    // MACD component (20 pts max)
+    if(currentAnalysis.macdValue > 0) score += 20.0;
+    
+    // RSI component (20 pts max)
+    if(UseRSI)
+    {
+        if(currentAnalysis.rsiValue < RSI_Oversold) score += 20.0;
+        else if(currentAnalysis.rsiValue < 50) score += 10.0;
+    }
+    
+    // MTF component (10 pts max)
+    if(UseMultiTimeframe && currentAnalysis.mtfTrend == TREND_UP) score += 10.0;
+    
+    // Divergence component (10 pts max)
+    if(UseRSIDivergence && currentAnalysis.divergence == DIV_BULLISH) score += 10.0;
+    
+    return NormalizeDouble(MathMin(100.0, score), 1);
+}
+
+//+------------------------------------------------------------------+
+//| Calculate numeric sell score (0–100) for analytics              |
+//+------------------------------------------------------------------+
+double CalculateSellScore()
+{
+    if(!currentAnalysis.sellSignal) return 0.0;
+    
+    double score = 0.0;
+    
+    // Trend component (40 pts max)
+    if(currentAnalysis.trend == TREND_DOWN)
+    {
+        score += 20.0;
+        if(UseADX && currentAnalysis.adxValue > ADX_Threshold) score += 10.0;
+        if(UseADX && currentAnalysis.adxMinusValue > currentAnalysis.adxPlusValue) score += 10.0;
+    }
+    
+    // MACD component (20 pts max)
+    if(currentAnalysis.macdValue < 0) score += 20.0;
+    
+    // RSI component (20 pts max)
+    if(UseRSI)
+    {
+        if(currentAnalysis.rsiValue > RSI_Overbought) score += 20.0;
+        else if(currentAnalysis.rsiValue > 50) score += 10.0;
+    }
+    
+    // MTF component (10 pts max)
+    if(UseMultiTimeframe && currentAnalysis.mtfTrend == TREND_DOWN) score += 10.0;
+    
+    // Divergence component (10 pts max)
+    if(UseRSIDivergence && currentAnalysis.divergence == DIV_BEARISH) score += 10.0;
+    
+    return NormalizeDouble(MathMin(100.0, score), 1);
 }
 
 //+------------------------------------------------------------------+
