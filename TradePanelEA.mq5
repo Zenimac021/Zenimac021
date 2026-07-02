@@ -827,6 +827,7 @@ double CalculateTrendStrength()
 
 //+------------------------------------------------------------------+
 //| Generate buy signal                                              |
+//| Requires at least SIGNAL_MODERATE strength to avoid weak alerts |
 //+------------------------------------------------------------------+
 bool GenerateBuySignal()
 {
@@ -837,7 +838,11 @@ bool GenerateBuySignal()
         if(UseRSIDivergence && currentAnalysis.divergence == DIV_BULLISH)
         {
             // Still require MACD not strongly bearish
-            if(currentAnalysis.macdValue >= 0) return true;
+            if(currentAnalysis.macdValue >= 0)
+            {
+                // Check signal strength - only generate signal if at least MODERATE strength
+                return (CalculateBuyStrengthInternal() >= SIGNAL_MODERATE);
+            }
         }
         return false;
     }
@@ -848,11 +853,13 @@ bool GenerateBuySignal()
     // Multi-timeframe filter: higher-timeframe trend must agree or be neutral
     if(UseMultiTimeframe && currentAnalysis.mtfTrend == TREND_DOWN) return false;
     
-    return true;
+    // Check signal strength - only generate signal if at least MODERATE strength
+    return (CalculateBuyStrengthInternal() >= SIGNAL_MODERATE);
 }
 
 //+------------------------------------------------------------------+
 //| Generate sell signal                                             |
+//| Requires at least SIGNAL_MODERATE strength to avoid weak alerts |
 //+------------------------------------------------------------------+
 bool GenerateSellSignal()
 {
@@ -862,7 +869,11 @@ bool GenerateSellSignal()
         // Allow divergence-based sell even in sideways/unknown trend
         if(UseRSIDivergence && currentAnalysis.divergence == DIV_BEARISH)
         {
-            if(currentAnalysis.macdValue <= 0) return true;
+            if(currentAnalysis.macdValue <= 0)
+            {
+                // Check signal strength - only generate signal if at least MODERATE strength
+                return (CalculateSellStrengthInternal() >= SIGNAL_MODERATE);
+            }
         }
         return false;
     }
@@ -873,17 +884,15 @@ bool GenerateSellSignal()
     // Multi-timeframe filter: higher-timeframe trend must agree or be neutral
     if(UseMultiTimeframe && currentAnalysis.mtfTrend == TREND_UP) return false;
     
-    return true;
+    // Check signal strength - only generate signal if at least MODERATE strength
+    return (CalculateSellStrengthInternal() >= SIGNAL_MODERATE);
 }
 
 //+------------------------------------------------------------------+
-//| Calculate buy signal strength                                    |
+//| Calculate buy signal strength score (internal, no signal guard) |
 //+------------------------------------------------------------------+
-ENUM_SIGNAL_STRENGTH CalculateBuyStrength()
+ENUM_SIGNAL_STRENGTH CalculateBuyStrengthInternal()
 {
-    if(!currentAnalysis.buySignal)
-        return SIGNAL_WEAK;
-    
     if(ArraySize(rsi) < 3 || ArraySize(macdMain) < 3 || ArraySize(macdSignal) < 3 || ArraySize(maFast) < 3 || ArraySize(maSlow) < 3)
         return SIGNAL_WEAK;
     
@@ -937,6 +946,17 @@ ENUM_SIGNAL_STRENGTH CalculateBuyStrength()
     if(strengthScore >= 6) return SIGNAL_STRONG;
     if(strengthScore >= 3) return SIGNAL_MODERATE;
     return SIGNAL_WEAK;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate buy signal strength                                    |
+//+------------------------------------------------------------------+
+ENUM_SIGNAL_STRENGTH CalculateBuyStrength()
+{
+    if(!currentAnalysis.buySignal)
+        return SIGNAL_WEAK;
+    
+    return CalculateBuyStrengthInternal();
 }
 
 //+------------------------------------------------------------------+
@@ -2798,13 +2818,10 @@ void GetATRBasedSLTP(double &slPips, double &tpPips)
 }
 
 //+------------------------------------------------------------------+
-//| Calculate sell signal strength                                   |
+//| Calculate sell signal strength score (internal, no signal guard)|
 //+------------------------------------------------------------------+
-ENUM_SIGNAL_STRENGTH CalculateSellStrength()
+ENUM_SIGNAL_STRENGTH CalculateSellStrengthInternal()
 {
-    if(!currentAnalysis.sellSignal)
-        return SIGNAL_WEAK;
-    
     if(ArraySize(rsi) < 3 || ArraySize(macdMain) < 3 || ArraySize(macdSignal) < 3 || ArraySize(maFast) < 3 || ArraySize(maSlow) < 3)
         return SIGNAL_WEAK;
     
@@ -2858,6 +2875,17 @@ ENUM_SIGNAL_STRENGTH CalculateSellStrength()
     if(strengthScore >= 6) return SIGNAL_STRONG;
     if(strengthScore >= 3) return SIGNAL_MODERATE;
     return SIGNAL_WEAK;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate sell signal strength                                   |
+//+------------------------------------------------------------------+
+ENUM_SIGNAL_STRENGTH CalculateSellStrength()
+{
+    if(!currentAnalysis.sellSignal)
+        return SIGNAL_WEAK;
+    
+    return CalculateSellStrengthInternal();
 }
 
 //+------------------------------------------------------------------+
