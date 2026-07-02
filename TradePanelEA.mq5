@@ -2604,7 +2604,9 @@ void CalculateRealStatistics()
         return;
     
     int totalDeals = HistoryDealsTotal();
-    if(totalDeals > 500) totalDeals = 500; // Performance limit
+    // Cap at 500 deals: prevents O(n) slowdown on accounts with large trade history
+    // while still providing statistically meaningful results over the 6-month window.
+    if(totalDeals > 500) totalDeals = 500;
     
     for(int i = 0; i < totalDeals; i++)
     {
@@ -2776,11 +2778,11 @@ void GetATRBasedSLTP(double &slPips, double &tpPips)
         slPips = NormalizeDouble((int)(atrValue * ATR_SL_Multiplier / pipValue), 0);
         tpPips = NormalizeDouble((int)(atrValue * ATR_TP_Multiplier / pipValue), 0);
         
-        // Apply minimum bounds
+        // Apply minimum bound to SL only (TP has its own multiplier and must not be
+        // artificially constrained by the SL minimum)
         if(ATR_MinSLPoints > 0 && slPips < ATR_MinSLPoints) slPips = ATR_MinSLPoints;
-        if(ATR_MinSLPoints > 0 && tpPips < ATR_MinSLPoints) tpPips = ATR_MinSLPoints;
         
-        // Apply maximum bounds
+        // Apply maximum bounds independently for SL and TP
         if(ATR_MaxSLPoints > 0 && slPips > ATR_MaxSLPoints) slPips = ATR_MaxSLPoints;
         if(ATR_MaxSLPoints > 0 && tpPips > ATR_MaxSLPoints) tpPips = ATR_MaxSLPoints;
         
@@ -2927,23 +2929,25 @@ ENUM_TREND_DIRECTION DetermineMTFTrend()
 ENUM_DIVERGENCE_TYPE DetectRSIDivergence()
 {
     int lookback = MathMax(8, MathMin(DivergenceLookback, 50));
+    // Minimum 8 bars ensures at least two distinct swings can form;
+    // maximum 50 bars keeps computation lightweight and divergence signals timely.
     int needed   = lookback + 2;
     
     // We need price (close) and RSI values
-    double closeArr[];
-    double rsiArr[];
-    ArraySetAsSeries(closeArr, true);
-    ArraySetAsSeries(rsiArr, true);
+    double closeBuffer[];  // price close series (index 0 = most recent)
+    double rsiBuffer[];    // RSI series matching TrendTimeframe
+    ArraySetAsSeries(closeBuffer, true);
+    ArraySetAsSeries(rsiBuffer, true);
     
-    if(CopyClose(Symbol(), TrendTimeframe, 0, needed, closeArr) < needed) return DIV_NONE;
-    if(CopyBuffer(rsiHandle, 0, 0, needed, rsiArr) < needed) return DIV_NONE;
+    if(CopyClose(Symbol(), TrendTimeframe, 0, needed, closeBuffer) < needed) return DIV_NONE;
+    if(CopyBuffer(rsiHandle, 0, 0, needed, rsiBuffer) < needed) return DIV_NONE;
     
     // Find the two most recent swing lows (for bullish divergence)
     // A swing low is a bar where the close is lower than both its neighbours
     int swingLow1 = -1, swingLow2 = -1; // indices (0 = most recent)
     for(int i = 1; i < lookback && (swingLow1 < 0 || swingLow2 < 0); i++)
     {
-        if(closeArr[i] < closeArr[i-1] && closeArr[i] < closeArr[i+1])
+        if(closeBuffer[i] < closeBuffer[i-1] && closeBuffer[i] < closeBuffer[i+1])
         {
             if(swingLow1 < 0)
                 swingLow1 = i;
@@ -2956,7 +2960,7 @@ ENUM_DIVERGENCE_TYPE DetectRSIDivergence()
     int swingHigh1 = -1, swingHigh2 = -1;
     for(int i = 1; i < lookback && (swingHigh1 < 0 || swingHigh2 < 0); i++)
     {
-        if(closeArr[i] > closeArr[i-1] && closeArr[i] > closeArr[i+1])
+        if(closeBuffer[i] > closeBuffer[i-1] && closeBuffer[i] > closeBuffer[i+1])
         {
             if(swingHigh1 < 0)
                 swingHigh1 = i;
@@ -2969,16 +2973,16 @@ ENUM_DIVERGENCE_TYPE DetectRSIDivergence()
     if(swingLow1 >= 0 && swingLow2 >= 0)
     {
         // swingLow1 is more recent than swingLow2
-        bool priceLowerLow = (closeArr[swingLow1] < closeArr[swingLow2]);
-        bool rsiHigherLow  = (rsiArr[swingLow1] > rsiArr[swingLow2]);
+        bool priceLowerLow = (closeBuffer[swingLow1] < closeBuffer[swingLow2]);
+        bool rsiHigherLow  = (rsiBuffer[swingLow1] > rsiBuffer[swingLow2]);
         if(priceLowerLow && rsiHigherLow) return DIV_BULLISH;
     }
     
     // Bearish divergence: price makes higher high but RSI makes lower high
     if(swingHigh1 >= 0 && swingHigh2 >= 0)
     {
-        bool priceHigherHigh = (closeArr[swingHigh1] > closeArr[swingHigh2]);
-        bool rsiLowerHigh    = (rsiArr[swingHigh1] < rsiArr[swingHigh2]);
+        bool priceHigherHigh = (closeBuffer[swingHigh1] > closeBuffer[swingHigh2]);
+        bool rsiLowerHigh    = (rsiBuffer[swingHigh1] < rsiBuffer[swingHigh2]);
         if(priceHigherHigh && rsiLowerHigh) return DIV_BEARISH;
     }
     
