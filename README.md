@@ -11,6 +11,17 @@ A professional MQL5 signal indicator for trading Gold (XAUUSD) on scalping timef
 - **Full Alert System**: Sound, push notifications, and email alerts
 - **Information Panel**: Real-time display of trend, ADX, session, and spread status
 
+## Repository Layout
+
+Files mirror the MT5 data folder, so each one copies straight into the matching folder under `Data Folder/MQL5/`.
+
+| Folder | Contents |
+|--------|----------|
+| [`MQL5/Experts/`](MQL5/Experts) | Expert Advisors: Chandelier Exit Scalper, Smart XAU Pro EA (v2.00), TradePanelEA (GoldScalp), XAU ScalperPro EA |
+| [`MQL5/Indicators/`](MQL5/Indicators) | Indicators and dashboards: GoldTrendScalper, Gold M5 Signal Generator, Multi-TimeFrame (basic, Advance, Premium), NR Scalping Dashboard, Institutional Dashboard, Advanced SMC Signals, Universal S/R Levels, Indicator Arrows |
+
+Older versions of files (for example Smart XAU Pro EA v1.40 and v1.41) are kept in git history rather than in the tree.
+
 ## Signal Logic
 
 ### Buy Conditions
