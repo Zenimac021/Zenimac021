@@ -278,6 +278,111 @@ private:
    string            m_baseUrl;
    bool              m_isConnected;
 
+   bool ExtractJsonNumber(const string response, const string key, double &value)
+   {
+      int pos = StringFind(response, key);
+      int length = StringLen(response);
+      if(pos < 0)
+         return false;
+
+      pos += StringLen(key);
+      while(pos < length)
+      {
+         ushort ch = StringGetCharacter(response, pos);
+         if(ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n')
+            break;
+         pos++;
+      }
+      if(pos >= length || StringGetCharacter(response, pos) != ':')
+         return false;
+
+      pos++;
+      while(pos < length)
+      {
+         ushort ch = StringGetCharacter(response, pos);
+         if(ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n')
+            break;
+         pos++;
+      }
+
+      int numberStart = pos;
+      if(pos < length && StringGetCharacter(response, pos) == '-')
+         pos++;
+      if(pos >= length)
+         return false;
+
+      ushort ch = StringGetCharacter(response, pos);
+      if(ch == '0')
+         pos++;
+      else if(ch >= '1' && ch <= '9')
+      {
+         do
+         {
+            pos++;
+            if(pos >= length)
+               break;
+            ch = StringGetCharacter(response, pos);
+         }
+         while(ch >= '0' && ch <= '9');
+      }
+      else
+         return false;
+
+      if(pos < length && StringGetCharacter(response, pos) == '.')
+      {
+         pos++;
+         int fractionStart = pos;
+         while(pos < length)
+         {
+            ch = StringGetCharacter(response, pos);
+            if(ch < '0' || ch > '9')
+               break;
+            pos++;
+         }
+         if(pos == fractionStart)
+            return false;
+      }
+
+      if(pos < length && (StringGetCharacter(response, pos) == 'e' ||
+                          StringGetCharacter(response, pos) == 'E'))
+      {
+         pos++;
+         if(pos < length && (StringGetCharacter(response, pos) == '+' ||
+                             StringGetCharacter(response, pos) == '-'))
+            pos++;
+         int exponentStart = pos;
+         while(pos < length)
+         {
+            ch = StringGetCharacter(response, pos);
+            if(ch < '0' || ch > '9')
+               break;
+            pos++;
+         }
+         if(pos == exponentStart)
+            return false;
+      }
+
+      int numberEnd = pos;
+      while(pos < length)
+      {
+         ch = StringGetCharacter(response, pos);
+         if(ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n')
+            break;
+         pos++;
+      }
+      if(pos < length && StringGetCharacter(response, pos) != ',' &&
+         StringGetCharacter(response, pos) != '}' &&
+         StringGetCharacter(response, pos) != ']')
+         return false;
+
+      double parsedValue = StringToDouble(StringSubstr(response, numberStart, numberEnd - numberStart));
+      if(!MathIsValidNumber(parsedValue))
+         return false;
+
+      value = parsedValue;
+      return true;
+   }
+
 public:
    CAgentBridge() : m_baseUrl(InpPythonHubUrl), m_isConnected(false) {}
 
@@ -302,10 +407,13 @@ public:
       if(res == 200)
       {
          string response = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
-         int pos = StringFind(response, "\"win_rate\":");
-         if(pos >= 0 && StringFind(response, "\"should_trade\":true") >= 0)
+         if(StringFind(response, "\"should_trade\":true") >= 0)
          {
-            outConfidence = StringToDouble(StringSubstr(response, pos + 11));
+            if(!ExtractJsonNumber(response, "\"win_rate\"", outConfidence))
+            {
+               outConfidence = 0.0;
+               return false;
+            }
             return (outConfidence >= InpMinAgentConf);
          }
       }
@@ -330,9 +438,8 @@ public:
       if(res == 200)
       {
          string response = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
-         int pos = StringFind(response, "\"size_multiplier\":");
-         if(pos >= 0) {
-            outMultiplier = StringToDouble(StringSubstr(response, pos + 18));
+         if(ExtractJsonNumber(response, "\"size_multiplier\"", outMultiplier))
+         {
             return true;
          }
       }
@@ -437,7 +544,7 @@ private:
    int               m_atrHandle;
    int               m_emaShortHandle;
    int               m_emaLongHandle;
-   int               m_emaM15Handle;     // [ENH-02 FIX] Proper M15 EMA handle
+   int               m_emaM30Handle;     // Optional M30 EMA handle
    int               m_emaH1Handle;      // [ENH-02] Optional H1 EMA handle
 
 public:
@@ -454,7 +561,7 @@ public:
    int               GetATRHandle()       const { return m_atrHandle; }
    int               GetEMAShortHandle()  const { return m_emaShortHandle; }
    int               GetEMALongHandle()   const { return m_emaLongHandle; }
-   int               GetEMAM15Handle()    const { return m_emaM15Handle; }   // [ENH-02]
+   int               GetEMAM30Handle()    const { return m_emaM30Handle; }
    int               GetEMAH1Handle()     const { return m_emaH1Handle; }    // [ENH-02]
 
    bool              IsValid() const;
@@ -467,7 +574,7 @@ CIndicatorManager::CIndicatorManager() :
    m_atrHandle(INVALID_HANDLE),
    m_emaShortHandle(INVALID_HANDLE),
    m_emaLongHandle(INVALID_HANDLE),
-   m_emaM15Handle(INVALID_HANDLE),    // [ENH-02]
+   m_emaM30Handle(INVALID_HANDLE),
    m_emaH1Handle(INVALID_HANDLE)      // [ENH-02]
 {
 }
@@ -479,6 +586,8 @@ CIndicatorManager::~CIndicatorManager()
 
 bool CIndicatorManager::Initialize()
 {
+   ReleaseAll();
+
    // Current timeframe (M5) indicators
    m_rsiHandle = iRSI(NULL, 0, RSI_Period, PRICE_CLOSE);
    m_macdHandle = iMACD(NULL, 0, MACD_Fast, MACD_Slow, MACD_Signal_Period, PRICE_CLOSE);
@@ -487,8 +596,8 @@ bool CIndicatorManager::Initialize()
    m_emaShortHandle = iMA(NULL, 0, EMA_Short_Period, 0, MODE_EMA, PRICE_CLOSE);
    m_emaLongHandle = iMA(NULL, 0, EMA_Long_Period, 0, MODE_EMA, PRICE_CLOSE);
 
-   // [ENH-02 FIX] Proper M30 and H1 EMA handles
-   m_emaM15Handle = iMA(_Symbol, PERIOD_M30, MTF_EMA_Period, 0, MODE_EMA, PRICE_CLOSE);
+   // Optional M30 and H1 EMA handles
+   m_emaM30Handle = iMA(_Symbol, PERIOD_M30, MTF_EMA_Period, 0, MODE_EMA, PRICE_CLOSE);
    m_emaH1Handle  = iMA(_Symbol, PERIOD_H1, MTF_EMA_Period, 0, MODE_EMA, PRICE_CLOSE);
 
    if(m_rsiHandle == INVALID_HANDLE || m_macdHandle == INVALID_HANDLE ||
@@ -496,11 +605,12 @@ bool CIndicatorManager::Initialize()
       m_emaShortHandle == INVALID_HANDLE || m_emaLongHandle == INVALID_HANDLE)
    {
       Print("[GOLD] Error creating indicator handles: ", GetLastError());
+      ReleaseAll();
       return false;
    }
 
    // [ENH-02] Warn if MTF handles fail (non-fatal)
-   if(m_emaM15Handle == INVALID_HANDLE)
+   if(m_emaM30Handle == INVALID_HANDLE)
       Print("[GOLD] Warning: Failed to create M30 EMA handle. MTF filter disabled.");
    if(m_emaH1Handle == INVALID_HANDLE)
       Print("[GOLD] Warning: Failed to create H1 EMA handle. MTF filter uses M30 only.");
@@ -516,7 +626,7 @@ void CIndicatorManager::ReleaseAll()
    if(m_atrHandle != INVALID_HANDLE) { IndicatorRelease(m_atrHandle); m_atrHandle = INVALID_HANDLE; }
    if(m_emaShortHandle != INVALID_HANDLE) { IndicatorRelease(m_emaShortHandle); m_emaShortHandle = INVALID_HANDLE; }
    if(m_emaLongHandle != INVALID_HANDLE) { IndicatorRelease(m_emaLongHandle); m_emaLongHandle = INVALID_HANDLE; }
-   if(m_emaM15Handle != INVALID_HANDLE) { IndicatorRelease(m_emaM15Handle); m_emaM15Handle = INVALID_HANDLE; }
+   if(m_emaM30Handle != INVALID_HANDLE) { IndicatorRelease(m_emaM30Handle); m_emaM30Handle = INVALID_HANDLE; }
    if(m_emaH1Handle != INVALID_HANDLE) { IndicatorRelease(m_emaH1Handle); m_emaH1Handle = INVALID_HANDLE; }
 }
 
@@ -686,10 +796,13 @@ void CSignalManager::ResetConsecutiveCounts()
 
 bool CSignalManager::IsSignalStillValid(int currentShift) const
 {
-   if(m_currentSignal == SIGNAL_NONE || m_signalBarTime == 0)
+   if(m_currentSignal == SIGNAL_NONE || m_signalBarTime == 0 || currentShift < 0)
       return false;
 
-   int signalCurrentIndex = iBarShift(_Symbol, PERIOD_CURRENT, m_signalBarTime);
+   int signalCurrentIndex = iBarShift(_Symbol, PERIOD_CURRENT, m_signalBarTime, true);
+   if(signalCurrentIndex < currentShift)
+      return false;
+
    int barsSinceSignal = signalCurrentIndex - currentShift;
 
    return (barsSinceSignal >= 0 && barsSinceSignal < SIGNAL_VALID_BARS);
@@ -1526,10 +1639,10 @@ bool CheckMTFAlignment(ENUM_SIGNAL_TYPE direction, bool &outDowngraded, double c
    ArraySetAsSeries(emaM30, true);
    ArraySetAsSeries(closeM30, true);
 
-   if(g_indicatorMgr.GetEMAM15Handle() == INVALID_HANDLE)
+   if(g_indicatorMgr.GetEMAM30Handle() == INVALID_HANDLE)
       return true; // Graceful degradation
 
-   if(CopyBuffer(g_indicatorMgr.GetEMAM15Handle(), 0, 0, 2, emaM30) < 2)
+   if(CopyBuffer(g_indicatorMgr.GetEMAM30Handle(), 0, 0, 2, emaM30) < 2)
       return true;
    if(CopyClose(_Symbol, PERIOD_M30, 0, 2, closeM30) < 2)
       return true;
