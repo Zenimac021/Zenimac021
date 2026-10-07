@@ -1,13 +1,12 @@
 //+------------------------------------------------------------------+
 //|                     Gold M5 Signal_Generator.mq5                 |
-//|                        Reviewed & Enhanced v3.20                 |
+//|                        Reviewed & Enhanced v3.30                 |
 //|                                                                  |
-//|  ENHANCED VERSION v3.20 - Scalping Pack: MTF fix, fresh-cross,   |
-//|  over-extension, spread-adaptive SL/TP, partial levels, perf opt |
+//|  v3.30 - Signal fixes, adaptive/session-aware scalping, outcomes |
 //+------------------------------------------------------------------+
-#property copyright "Updated by Grok (xAI) - Reviewed v3.20"
+#property copyright "Updated by Grok (xAI) - Reviewed v3.30"
 #property link      "https://x.ai"
-#property version   "3.20"
+#property version   "3.30"
 #property strict
 #property indicator_chart_window
 #property indicator_buffers 15
@@ -212,12 +211,24 @@ input bool   UseSpreadAdaptiveSLTP  = true;   // Pad SL/TP by current spread (co
 input bool   Show_Partial_Levels    = true;   // Show TP1 (50%) line on the panel
 input bool   UseIncrementalCalc     = true;   // Perf: only recompute recent bars per tick
 
+//--- [SCALP v3.30] Scalping Enhancements
+input group "Scalping Enhancements (v3.30)"
+input bool   UseAdaptiveSLTP             = true;
+input double Adaptive_MinScale           = 0.7;
+input double Adaptive_MaxScale           = 1.6;
+input bool   UseSessionQualityScore      = true;
+input bool   UseVolumeMomentum           = true;
+input int    Volume_Momentum_Bars        = 3;
+input bool   UseATRExpiry                = true;
+input double Expiry_ATR_Mult             = 1.5;
+input bool   FreshCross_Direction_Aligned = true;
+
 //--- Panel settings
 input group "Panel Settings"
 input int Panel_X                = 10;
 input int Panel_Y                = 100;
 input int Panel_Width            = 230;
-input int Panel_Height           = 350;
+input int Panel_Height           = 450;        // Increased for v3.30 panel rows
 input int Level_Line_Bars        = 12;
 input color Panel_Background      = C'27,27,36';
 input color Panel_Border          = C'47,47,68';
@@ -380,7 +391,7 @@ public:
 private:
    double CalculateEntropy(const double &prices[], const int shift, const int period)
    {
-      if(period < 10 || ArraySize(prices) < shift + period + 1) return 0;
+      if(period < 10 || ArraySize(prices) < shift + period + 1) return DBL_MAX;
 
       int counts[10];
       ArrayInitialize(counts, 0);
@@ -396,7 +407,7 @@ private:
       }
 
       double range = max_r - min_r;
-      if(range == 0) return 0;
+      if(range == 0) return DBL_MAX;
 
       for(int i = 0; i < period; i++) {
          int bin = (int)MathFloor(((returns[i] - min_r) / range) * (10 - 1));
@@ -529,6 +540,8 @@ private:
    int               m_signalBarIndex;
    double            m_stopLoss;
    double            m_takeProfit;
+   double            m_signalRSI;
+   double            m_signalADX;
    int               m_alertCounter;
    double            m_agentConfidence;
    SSignalHistoryItem m_signalHistory[];
@@ -543,7 +556,8 @@ public:
                      ~CSignalManager();
 
    void              Reset();
-   void              SetSignal(ENUM_SIGNAL_TYPE type, double price, datetime time, int barIndex, double sl, double tp, double confidence = 0);
+   void              SetSignal(ENUM_SIGNAL_TYPE type, double price, datetime time, int barIndex, double sl, double tp,
+                               double confidence = 0, double rsiVal = 0, double adxVal = 0);
    void              ResetSignalIfNeeded(const double &emaShort[], const double &emaLong[],
                                          const double &macdMain[], const double &macdSignal[],
                                          const double &rsiArr[], const double &adxPlusDiArr[],
@@ -562,6 +576,8 @@ public:
    datetime          GetSignalBarTime()   const { return m_signalBarTime; }
    double            GetStopLoss()        const { return m_stopLoss; }
    double            GetTakeProfit()      const { return m_takeProfit; }
+   double            GetSignalRSI()        const { return m_signalRSI; }
+   double            GetSignalADX()        const { return m_signalADX; }
    int               GetAlertCounter()     const { return m_alertCounter; }
    double            GetAgentConfidence() const { return m_agentConfidence; }
    int               GetSignalBarIndex()  const { return m_signalBarIndex; }
@@ -584,6 +600,8 @@ CSignalManager::CSignalManager() :
    m_signalBarIndex(-1),
    m_stopLoss(0),
    m_takeProfit(0),
+   m_signalRSI(0),
+   m_signalADX(0),
    m_alertCounter(0),
    m_agentConfidence(0),
    m_buyConsecutiveCount(0),    // [ENH-05]
@@ -606,6 +624,8 @@ void CSignalManager::Reset()
    m_signalBarIndex = -1;
    m_stopLoss = 0;
    m_takeProfit = 0;
+   m_signalRSI = 0;
+   m_signalADX = 0;
    m_agentConfidence = 0;
    m_alertCounter = 0;
    m_buyConsecutiveCount = 0;
@@ -613,7 +633,8 @@ void CSignalManager::Reset()
    m_lastConsecutiveBarTime = 0;
 }
 
-void CSignalManager::SetSignal(ENUM_SIGNAL_TYPE type, double price, datetime time, int barIndex, double sl, double tp, double confidence = 0)
+void CSignalManager::SetSignal(ENUM_SIGNAL_TYPE type, double price, datetime time, int barIndex, double sl, double tp,
+                               double confidence = 0, double rsiVal = 0, double adxVal = 0)
 {
    m_currentSignal = type;
    m_signalPrice = price;
@@ -623,6 +644,8 @@ void CSignalManager::SetSignal(ENUM_SIGNAL_TYPE type, double price, datetime tim
    m_agentConfidence = confidence;
    m_stopLoss = sl;
    m_takeProfit = tp;
+   m_signalRSI = rsiVal;
+   m_signalADX = adxVal;
    m_alertCounter = 0;
 
    // Reset consecutive counts after a signal fires
@@ -680,7 +703,7 @@ void CSignalManager::ResetSignalIfNeeded(const double &emaShortArr[], const doub
    if(m_currentSignal == SIGNAL_NONE || m_signalBarIndex < 0)
       return;
 
-   // Only check at the signal bar or more recent bars
+   // [FIX v3.30] Shift 0 evaluates live conditions; ignore bars older than the signal bar.
    if(shift > m_signalBarIndex)
       return;
 
@@ -785,7 +808,8 @@ public:
                              CSignalManager &signalMgr, const double &atrArr[], int shift,
                              string filterReason = "None",
                              ENUM_MARKET_REGIME regime = REGIME_UNKNOWN,    // [BUG-06 FIX]
-                             double spreadPctTP = 0);                       // [ENH-03]
+                             double spreadPctTP = 0,                        // [ENH-03]
+                             double sessionQuality = 1.0, double riskMultiplier = 1.0);
 
 private:
    void              CreateLabel(string name, int x, int y, string text, color textColor, int fontSize = -1);
@@ -826,7 +850,8 @@ void CPanelHelper::DeleteAllObjects()
 
    string objects[] = {"_BG", "_Title_BG", "_Title", "_Divider", "_Signal", "_Trend", "_Strength",
                        "_RSI", "_ADX", "_DI", "_Volume", "_TP", "_SL", "_RR", "_Time", "_Regime", "_Agent", "_Filter",
-                       "_MiniDivider", "_Entry", "_MiniDivider1", "_MiniDivider2", "_MACD", "_SpreadPct"};
+                       "_MiniDivider", "_Entry", "_MiniDivider1", "_MiniDivider2", "_MACD", "_SpreadPct",
+                       "_SessionQ", "_RiskMult", "_PnL"};
 
    for(int i = 0; i < ArraySize(objects); i++)
       ObjectDelete(0, prefix + objects[i]);
@@ -865,7 +890,7 @@ void CPanelHelper::Create()
    ObjectSetInteger(0, m_panelName + "_BG", OBJPROP_WIDTH, 2);
 
    CreateRectangle(m_panelName + "_Title_BG", m_panelX, m_panelY, m_panelWidth, 35, Panel_Border);
-   CreateLabel(m_panelName + "_Title", m_panelX + 10, m_panelY + 10, "SIGNAL GENERATOR v3.20", Panel_Title_Color, m_titleFontSize);
+   CreateLabel(m_panelName + "_Title", m_panelX + 10, m_panelY + 10, "SIGNAL GENERATOR v3.30", Panel_Title_Color, m_titleFontSize);
 
    CreateRectangle(m_panelName + "_Divider", m_panelX + 5, m_panelY + 40, m_panelWidth - 10, 2, Divider_Color);
 
@@ -1051,7 +1076,8 @@ void CPanelHelper::Update(const double &closeArr[], const double &rsiArr[], cons
                            const double &volumeMAArr[], const double &tickVolumeArr[],
                            const double &emaShortArr[], const double &emaLongArr[],
                            CSignalManager &signalMgr, const double &atrArr[], int shift,
-                           string filterReason, ENUM_MARKET_REGIME regime, double spreadPctTP)
+                           string filterReason, ENUM_MARKET_REGIME regime, double spreadPctTP,
+                           double sessionQuality, double riskMultiplier)
 {
    // Update horizontal lines FIRST
    double entryPrice = signalMgr.GetSignalPrice();
@@ -1078,6 +1104,7 @@ void CPanelHelper::Update(const double &closeArr[], const double &rsiArr[], cons
    double displayedVolumeRatio = (volumeMAArr[shift] > 0.0) ? ((double)tickVolumeArr[shift] / volumeMAArr[shift]) : 0.0;
    double strength = CalculateSignalStrength(adxMainArr, volumeMAArr, tickVolumeArr, emaShortArr, emaLongArr,
                                               adxPlusDiArr, adxMinusDiArr, rsiArr, macdMainArr, macdSignalArr, shift);
+   strength *= sessionQuality;
    string trendDirection = DetermineTrendDirection(emaShortArr, emaLongArr, adxMainArr, adxPlusDiArr, adxMinusDiArr, shift);
 
    // [BUG-03 FIX] Use the SAME dynamic threshold as signal generation (single source of truth)
@@ -1162,6 +1189,15 @@ void CPanelHelper::Update(const double &closeArr[], const double &rsiArr[], cons
    CreateLabel(m_panelName + "_Strength", m_panelX + 15, currentY, "Strength: " + IntegerToString((int)strength) + "%", strengthColor);
    currentY += m_lineHeight + sectionSpacing;
 
+   CreateLabel(m_panelName + "_SessionQ", m_panelX + 15, currentY,
+               "Session Q: " + IntegerToString((int)MathRound(sessionQuality * 100.0)) + "%",
+               (sessionQuality >= 0.85) ? Success_Color : Warning_Color);
+   currentY += m_lineHeight;
+   CreateLabel(m_panelName + "_RiskMult", m_panelX + 15, currentY,
+               "Risk Mult: " + DoubleToString(riskMultiplier, 2) + "x",
+               (riskMultiplier < 1.0) ? Warning_Color : Value_Color);
+   currentY += m_lineHeight + sectionSpacing;
+
    // Mini divider
    CreateRectangle(m_panelName + "_MiniDivider1", m_panelX + 15, currentY, m_panelWidth - 30, 1, Divider_Color);
    currentY += sectionSpacing;
@@ -1173,6 +1209,20 @@ void CPanelHelper::Update(const double &closeArr[], const double &rsiArr[], cons
       color entryColor = (signalType == SIGNAL_BUY) ? Signal_Buy : Signal_Sell;
       CreateLabel(m_panelName + "_Entry", m_panelX + 15, currentY,
                   entryArrow + " Entry: " + DoubleToString(signalPrice, _Digits), entryColor);
+      currentY += m_lineHeight;
+
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double pnlDistance = (signalType == SIGNAL_BUY) ? bid - signalPrice : signalPrice - bid;
+      double pipSize = GetPipSize();
+      // [SCALP v3.30] Display live P&L in pips for gold readability.
+      if(pipSize > 0.0)
+      {
+         string pnlText = (pnlDistance >= 0.0 ? "+" : "") + DoubleToString(pnlDistance / pipSize, 1) + " pips";
+         CreateLabel(m_panelName + "_PnL", m_panelX + 15, currentY, "P&L: " + pnlText,
+                     (pnlDistance >= 0.0) ? Success_Color : Signal_Sell);
+      }
+      else
+         ObjectDelete(0, m_panelName + "_PnL");
       currentY += m_lineHeight;
 
       if(signalTP != 0)
@@ -1218,6 +1268,7 @@ void CPanelHelper::Update(const double &closeArr[], const double &rsiArr[], cons
    }
    else
    {
+      ObjectDelete(0, m_panelName + "_PnL");
       CreateLabel(m_panelName + "_Entry", m_panelX + 15, currentY, "No Active Signal", Signal_Neutral);
       currentY += m_lineHeight;
    }
@@ -1275,12 +1326,19 @@ CAgentBridge       g_agent;
 CPanelHelper      *g_panel = NULL;
 
 //--- Global Engine Copies for Calculated Tolerances
-double   g_MaxSpreadPoints   = 0.0;    // Calculated max spread threshold in raw points
+double   g_MaxSpreadPoints   = 0.0;    // Maximum spread threshold in price units
 int      g_ShortEMAHandle    = INVALID_HANDLE;
 int      g_LongEMAHandle     = INVALID_HANDLE;
 int      g_ATRHandle         = INVALID_HANDLE;
 datetime g_LastServerPing    = 0;      // Prevents thread bottlenecks
 datetime g_LastPythonHubPollBar = 0;
+datetime g_LastRiskModePollBar = 0;
+datetime g_RiskDayStart = 0;
+datetime g_LastSignalClosedBarTime = 0;
+bool     g_RiskNewDayPending = false;
+double   g_DailyLossATR = 0.0;
+double   g_TotalLossATR = 0.0;
+double   g_RiskMultiplier = 1.0;
 
 //--- Indicator buffers
 double EMA_Short_Buffer[];
@@ -1392,6 +1450,37 @@ double GetCurrentSpreadPips()
    return (spreadPoints * _Point) / pipSize;
 }
 
+double CalculateATRAverage(const double &atrArr[], int shift, int period)
+{
+   if(period <= 0 || ArraySize(atrArr) <= shift)
+      return 0.0;
+
+   int lookback = MathMin(period, ArraySize(atrArr) - shift);
+   double sum = 0.0;
+   int count = 0;
+   for(int i = shift; i < shift + lookback; i++)
+   {
+      if(atrArr[i] > 0.0)
+      {
+         sum += atrArr[i];
+         count++;
+      }
+   }
+   return (count > 0) ? sum / count : 0.0;
+}
+
+double GetAdaptiveATRScale(const double &atrArr[], int shift)
+{
+   if(!UseAdaptiveSLTP)
+      return 1.0;
+
+   double atrMA = CalculateATRAverage(atrArr, shift, ATR_MA_Period);
+   if(atrMA <= 0.0 || atrArr[shift] <= 0.0)
+      return 1.0;
+
+   return MathMax(Adaptive_MinScale, MathMin(Adaptive_MaxScale, atrArr[shift] / atrMA));
+}
+
 // [BUG-03 FIX] Unified dynamic volume threshold calculation
 double GetDynamicVolumeThreshold(ENUM_MARKET_REGIME regime)
 {
@@ -1415,26 +1504,7 @@ bool IsATREnvelopeOK(const double &atrArr[], int shift)
    if(!UseATREnvelope || ATR_MA_Period <= 0)
       return true;
 
-   // Calculate ATR moving average
-   double atrSum = 0;
-   int count = 0;
-   int lookback = MathMin(ATR_MA_Period, ArraySize(atrArr) - shift - 1);
-   if(lookback <= 0)
-      return true;
-
-   for(int i = shift; i < shift + lookback; i++)
-   {
-      if(atrArr[i] > 0)
-      {
-         atrSum += atrArr[i];
-         count++;
-      }
-   }
-
-   if(count == 0)
-      return true;
-
-   double atrMA = atrSum / count;
+   double atrMA = CalculateATRAverage(atrArr, shift, ATR_MA_Period);
    if(atrMA == 0)
       return true;
 
@@ -1443,7 +1513,7 @@ bool IsATREnvelopeOK(const double &atrArr[], int shift)
 }
 
 // [ENH-02] MTF Alignment Check
-bool CheckMTFAlignment(ENUM_SIGNAL_TYPE direction, bool &outDowngraded)
+bool CheckMTFAlignment(ENUM_SIGNAL_TYPE direction, bool &outDowngraded, double currentATR)
 {
    outDowngraded = false;
 
@@ -1464,12 +1534,15 @@ bool CheckMTFAlignment(ENUM_SIGNAL_TYPE direction, bool &outDowngraded)
    if(CopyClose(_Symbol, PERIOD_M30, 0, 2, closeM30) < 2)
       return true;
 
-   // M30 trend: bullish if close > EMA
-   bool m30Bullish = (closeM30[1] > emaM30[1]); // Use confirmed bar [1]
+   // [FIX v3.30] Blend the last closed M30 trend with the forming bar's live close.
+   double tolerance = 0.25 * MathMax(0.0, currentATR);
+   bool m30Bullish = (closeM30[1] > emaM30[1] && closeM30[0] >= emaM30[1] - tolerance);
+   bool m30Bearish = (closeM30[1] < emaM30[1] && closeM30[0] <= emaM30[1] + tolerance);
 
    // Also check H1 if available
    bool h1Available = false;
    bool h1Bullish = true; // Default to aligned if unavailable
+   bool h1Bearish = false;
    if(g_indicatorMgr.GetEMAH1Handle() != INVALID_HANDLE)
    {
       double emaH1[], closeH1[];
@@ -1478,7 +1551,8 @@ bool CheckMTFAlignment(ENUM_SIGNAL_TYPE direction, bool &outDowngraded)
       if(CopyBuffer(g_indicatorMgr.GetEMAH1Handle(), 0, 0, 2, emaH1) >= 2 &&
          CopyClose(_Symbol, PERIOD_H1, 0, 2, closeH1) >= 2)
       {
-         h1Bullish = (closeH1[1] > emaH1[1]);
+         h1Bullish = (closeH1[1] > emaH1[1] && closeH1[0] >= emaH1[1] - tolerance);
+         h1Bearish = (closeH1[1] < emaH1[1] && closeH1[0] <= emaH1[1] + tolerance);
          h1Available = true;
       }
    }
@@ -1489,22 +1563,17 @@ bool CheckMTFAlignment(ENUM_SIGNAL_TYPE direction, bool &outDowngraded)
    if(UseH1Confirmation && h1Available)
    {
       mtfBullish = (m30Bullish && h1Bullish);
-      mtfBearish = (!m30Bullish && !h1Bullish);
+      mtfBearish = (m30Bearish && h1Bearish);
    }
    else
    {
       mtfBullish = m30Bullish;   // M30-only behavior (default)
-      mtfBearish = !m30Bullish;
+      mtfBearish = m30Bearish;
    }
 
-   if(direction == SIGNAL_BUY && mtfBearish)
-   {
-      if(MTF_Mode == MTF_BLOCK)
-         return false;
-      else if(MTF_Mode == MTF_DOWNGRADE)
-         outDowngraded = true;
-   }
-   else if(direction == SIGNAL_SELL && mtfBullish)
+   bool aligned = (direction == SIGNAL_BUY && mtfBullish) ||
+                  (direction == SIGNAL_SELL && mtfBearish);
+   if(!aligned)
    {
       if(MTF_Mode == MTF_BLOCK)
          return false;
@@ -1564,27 +1633,55 @@ bool IsOverExtended(const double &closeArr[], const double &emaShortArr[], const
 }
 
 // [SCALP v3.20] Bars since the EMA Short/Long cross (relative to shift). -1 if no cross in window.
-int BarsSinceEMACross(const double &emaShortArr[], const double &emaLongArr[], int shift, int maxLook)
+int BarsSinceEMACross(const double &emaShortArr[], const double &emaLongArr[], int shift, int maxLook,
+                      ENUM_SIGNAL_TYPE &outDirection)
 {
+   outDirection = SIGNAL_NONE;
    bool bullNow = (emaShortArr[shift] > emaLongArr[shift]);
    int limit = shift + maxLook;
    for(int i = shift + 1; i <= limit && (i + 1) < ArraySize(emaShortArr); i++)
    {
       bool bullPrev = (emaShortArr[i] > emaLongArr[i]);
       if(bullPrev != bullNow)
+      {
+         outDirection = bullNow ? SIGNAL_BUY : SIGNAL_SELL;
          return (i - shift);
+      }
    }
    return -1;
 }
 
 // [SCALP v3.20] Require a recent cross so entries are not late in an extended trend
-bool IsFreshCross(const double &emaShortArr[], const double &emaLongArr[], int shift)
+bool IsFreshCross(const double &emaShortArr[], const double &emaLongArr[], int shift, ENUM_SIGNAL_TYPE direction)
 {
    if(!UseFreshCrossFilter)
       return true;
 
-   int bars = BarsSinceEMACross(emaShortArr, emaLongArr, shift, Fresh_Cross_MaxBars);
-   return (bars >= 0 && bars <= Fresh_Cross_MaxBars);
+   ENUM_SIGNAL_TYPE crossDirection = SIGNAL_NONE;
+   int bars = BarsSinceEMACross(emaShortArr, emaLongArr, shift, Fresh_Cross_MaxBars, crossDirection);
+   return (bars >= 0 && bars <= Fresh_Cross_MaxBars &&
+           (!FreshCross_Direction_Aligned || direction == SIGNAL_NONE || crossDirection == direction));
+}
+
+double GetSessionQuality(datetime barTime)
+{
+   if(!UseSessionQualityScore || !UseSessionDetection)
+      return 1.0;
+
+   MqlDateTime dt;
+   TimeToStruct(barTime, dt);
+   int gmtHour = NormalizeHour(dt.hour - GetServerToGMTOffset());
+   bool inLondon = IsHourInRange(gmtHour, Session_LondonStart, Session_LondonEnd);
+   bool inNY = IsHourInRange(gmtHour, Session_NYStart, Session_NYEnd);
+   if(inLondon && inNY) return 1.0;
+   if(inLondon) return 0.85;
+   if(inNY) return 0.75;
+   return 0.5;
+}
+
+string GetRiskGlobalPrefix()
+{
+   return "GoldM5SG_" + StringSubstr(_Symbol, 0, 30) + "_";
 }
 
 // [SCALP v3.20] Pad SL/TP by the current spread so cost is accounted for in the levels
@@ -1787,10 +1884,24 @@ int OnInit()
       return INIT_FAILED;
    }
 
-   g_MaxSpreadPoints = Max_Spread_Pips * 10.0 * pointSize;
+   // [FIX v3.30] GetPipSize returns price units across digit configurations.
+   g_MaxSpreadPoints = Max_Spread_Pips * GetPipSize();
 
    g_LastServerPing = 0;
    g_LastPythonHubPollBar = 0;
+   g_LastRiskModePollBar = 0;
+
+   string riskPrefix = GetRiskGlobalPrefix();
+   string riskDayKey = riskPrefix + "Day";
+   string dailyLossKey = riskPrefix + "DailyLossATR";
+   string totalLossKey = riskPrefix + "TotalLossATR";
+   if(GlobalVariableCheck(totalLossKey))
+      g_TotalLossATR = GlobalVariableGet(totalLossKey);
+   if(GlobalVariableCheck(riskDayKey))
+      g_RiskDayStart = (datetime)GlobalVariableGet(riskDayKey);
+   if(GlobalVariableCheck(dailyLossKey) &&
+      TimeToString(g_RiskDayStart, TIME_DATE) == TimeToString(TimeCurrent(), TIME_DATE))
+      g_DailyLossATR = GlobalVariableGet(dailyLossKey);
 
    // Validate input parameters
    if(EMA_Short_Period < 1 || EMA_Short_Period > 100)
@@ -1904,6 +2015,22 @@ int OnInit()
       Print("[GOLD] Error: Fresh_Cross_MaxBars must be between 1 and 30");
       return INIT_PARAMETERS_INCORRECT;
    }
+   if(Adaptive_MinScale <= 0.0 || Adaptive_MaxScale <= 0.0 ||
+      Adaptive_MinScale > Adaptive_MaxScale || Adaptive_MaxScale > 5.0)
+   {
+      Print("[GOLD] Error: Adaptive scale values must be > 0, min <= max, and max <= 5.0");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+   if(Volume_Momentum_Bars < 1 || Volume_Momentum_Bars > 20)
+   {
+      Print("[GOLD] Error: Volume_Momentum_Bars must be between 1 and 20");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+   if(Expiry_ATR_Mult <= 0.0 || Expiry_ATR_Mult > 10.0)
+   {
+      Print("[GOLD] Error: Expiry_ATR_Mult must be between 0.01 and 10.0");
+      return INIT_PARAMETERS_INCORRECT;
+   }
 
    // Initialize structural indicator handles through the manager
    if(!g_indicatorMgr.Initialize())
@@ -1978,7 +2105,7 @@ int OnInit()
    PlotIndexSetInteger(4, PLOT_LINE_COLOR, 0, PriceAction_Bullish);
    PlotIndexSetInteger(5, PLOT_LINE_COLOR, 0, PriceAction_Bearish);
 
-   Print("[GOLD] Indicator initialized successfully - Version 3.20 (Scalping Pack)");
+   Print("[GOLD] Indicator initialized successfully - Version 3.30 (Scalping Pack)");
    return INIT_SUCCEEDED;
 }
 
@@ -2031,6 +2158,17 @@ int OnCalculate(const int rates_total,
    ArraySetAsSeries(time, true);
    ArraySetAsSeries(tick_volume, true);
 
+   // [FIX v3.30] Plot buffers are sized by the terminal when calculation begins.
+   if(prev_calculated == 0)
+   {
+      ArrayInitialize(Buy_Signal_Buffer, EMPTY_VALUE);
+      ArrayInitialize(Sell_Signal_Buffer, EMPTY_VALUE);
+      ArrayInitialize(EMA_Short_Buffer, EMPTY_VALUE);
+      ArrayInitialize(EMA_Long_Buffer, EMPTY_VALUE);
+      ArrayInitialize(Bullish_Price_Action_Buffer, EMPTY_VALUE);
+      ArrayInitialize(Bearish_Price_Action_Buffer, EMPTY_VALUE);
+   }
+
    // [PERF v3.20] On a fully calculated chart only the most recent bars change, so we
    // recompute a bounded window instead of the whole history on every tick. EMA/RSI/etc.
    // on older bars are immutable and retain their previously copied values.
@@ -2070,13 +2208,80 @@ int OnCalculate(const int rates_total,
    if(!ValidateBuffers() || !CheckIndicatorsValid(shift))
       return prev_calculated;
 
+   double liveBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   bool signalExpired = false;
+   datetime currentDayStart = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
+   bool isNewDay = (currentDayStart != g_RiskDayStart);
+   if(isNewDay)
+   {
+      g_RiskDayStart = currentDayStart;
+      g_DailyLossATR = 0.0;
+      g_RiskNewDayPending = true;
+      GlobalVariableSet(GetRiskGlobalPrefix() + "Day", (double)g_RiskDayStart);
+      GlobalVariableSet(GetRiskGlobalPrefix() + "DailyLossATR", g_DailyLossATR);
+   }
+
+   // [FIX v3.30] Track signal TP/SL outcomes once; Reset clears the active signal state.
+   ENUM_SIGNAL_TYPE activeSignal = g_signalMgr.GetCurrentSignal();
+   if(activeSignal != SIGNAL_NONE && liveBid > 0.0)
+   {
+      double target = g_signalMgr.GetTakeProfit();
+      double stop = g_signalMgr.GetStopLoss();
+      bool hitTarget = (activeSignal == SIGNAL_BUY) ? liveBid >= target : liveBid <= target;
+      bool hitStop = (activeSignal == SIGNAL_BUY) ? liveBid <= stop : liveBid >= stop;
+      if((hitTarget || hitStop) && target > 0.0 && stop > 0.0)
+      {
+         bool winner = hitTarget && !hitStop;
+         double exitPrice = winner ? target : stop;
+         double profitDistance = (activeSignal == SIGNAL_BUY) ?
+                                 exitPrice - g_signalMgr.GetSignalPrice() :
+                                 g_signalMgr.GetSignalPrice() - exitPrice;
+         g_agent.RecordTrade(winner, profitDistance, activeSignal,
+                             g_signalMgr.GetSignalRSI(), g_signalMgr.GetSignalADX());
+         g_LastSignalClosedBarTime = g_signalMgr.GetSignalBarTime();
+         if(!winner && atr_buffer[shift] > 0.0)
+         {
+            double lossATR = MathAbs(profitDistance) / atr_buffer[shift];
+            g_DailyLossATR += lossATR;
+            g_TotalLossATR += lossATR;
+            GlobalVariableSet(GetRiskGlobalPrefix() + "DailyLossATR", g_DailyLossATR);
+            GlobalVariableSet(GetRiskGlobalPrefix() + "TotalLossATR", g_TotalLossATR);
+         }
+         g_signalMgr.Reset();
+      }
+      else if(UseATRExpiry && atr_buffer[shift] > 0.0 &&
+              ((activeSignal == SIGNAL_BUY && liveBid < g_signalMgr.GetSignalPrice() - Expiry_ATR_Mult * atr_buffer[shift]) ||
+               (activeSignal == SIGNAL_SELL && liveBid > g_signalMgr.GetSignalPrice() + Expiry_ATR_Mult * atr_buffer[shift])))
+      {
+         g_LastSignalClosedBarTime = g_signalMgr.GetSignalBarTime();
+         g_signalMgr.Reset();
+         signalExpired = true;
+      }
+   }
+
+   // [FIX v3.30] Query risk mode no more than once per new bar.
+   if(time[0] != g_LastRiskModePollBar)
+   {
+      g_LastRiskModePollBar = time[0];
+      double riskMultiplier = 1.0;
+      g_agent.GetRiskMode(g_DailyLossATR, g_TotalLossATR, g_RiskNewDayPending, riskMultiplier);
+      g_RiskMultiplier = riskMultiplier;
+      g_RiskNewDayPending = false;
+   }
+
    // Clear current bar signals
    Buy_Signal_Buffer[0] = EMPTY_VALUE;
    Sell_Signal_Buffer[0] = EMPTY_VALUE;
    Bullish_Price_Action_Buffer[0] = EMPTY_VALUE;
    Bearish_Price_Action_Buffer[0] = EMPTY_VALUE;
+   // [FIX v3.30] Clear prior confirmed-bar arrows before evaluating this tick.
+   Buy_Signal_Buffer[shift] = EMPTY_VALUE;
+   Sell_Signal_Buffer[shift] = EMPTY_VALUE;
+   Bullish_Price_Action_Buffer[shift] = EMPTY_VALUE;
+   Bearish_Price_Action_Buffer[shift] = EMPTY_VALUE;
 
    datetime signalBarTime = time[shift];
+   double sessionQuality = GetSessionQuality(signalBarTime);
 
    // Calculate volume metrics
    double baselineVolume = CalculateVolumeAverage(tick_volume_buffer, shift + 1, VOLUME_MA_PERIOD);
@@ -2098,6 +2303,9 @@ int OnCalculate(const int rates_total,
 
    // [ENH-01] ATR Envelope Filter
    bool atrEnvelopeOK = IsATREnvelopeOK(atr_buffer, shift);
+   bool volumeMomentumOK = !UseVolumeMomentum ||
+                           tick_volume_buffer[shift] > CalculateVolumeAverage(tick_volume_buffer,
+                                                                              shift + 1, Volume_Momentum_Bars);
 
    // [BUG-04 FIX] Proper filter reason cascade using else-if chain
    string filterReason = "None";
@@ -2111,9 +2319,18 @@ int OnCalculate(const int rates_total,
       filterReason = "High Spread";
    else if(baselineVolume > 0.0 && volumeRatio < dynamicVolThreshold)
       filterReason = "Low Vol";
+   else if(!volumeMomentumOK)
+      filterReason = "Vol Momentum";
+   if(signalExpired)
+      filterReason = "Expired";
 
    // Cooldown check
    bool cooldownOK = true;
+   if(g_LastSignalClosedBarTime == signalBarTime)
+   {
+      cooldownOK = false;
+      if(filterReason == "None") filterReason = "Cooldown";
+   }
    if(g_signalMgr.GetSignalBarTime() != 0 && Signal_Cooldown > 0)
    {
       cooldownOK = ((signalBarTime - g_signalMgr.GetSignalBarTime()) >= (datetime)(PeriodSeconds() * Signal_Cooldown));
@@ -2133,7 +2350,7 @@ int OnCalculate(const int rates_total,
    if(g_signalMgr.GetCurrentSignal() != SIGNAL_NONE)
    {
       g_signalMgr.ResetSignalIfNeeded(EMA_Short_Buffer, EMA_Long_Buffer, macd_main, macd_signal,
-                                       rsi, adx_plus_di, adx_minus_di, close, shift);
+                                       rsi, adx_plus_di, adx_minus_di, close, 0);
    }
 
    // Random Walk filter
@@ -2171,14 +2388,19 @@ int OnCalculate(const int rates_total,
 
    // [SCALP v3.20+] Reuse scalp gates once so panel reasons and execution logic stay aligned.
    bool overExtended = IsOverExtended(close, EMA_Short_Buffer, atr_buffer, shift);
-   bool freshCrossOK = IsFreshCross(EMA_Short_Buffer, EMA_Long_Buffer, shift);
+   bool freshCrossOK = IsFreshCross(EMA_Short_Buffer, EMA_Long_Buffer, shift, SIGNAL_NONE);
+   bool buyFreshCrossOK = IsFreshCross(EMA_Short_Buffer, EMA_Long_Buffer, shift, SIGNAL_BUY);
+   bool sellFreshCrossOK = IsFreshCross(EMA_Short_Buffer, EMA_Long_Buffer, shift, SIGNAL_SELL);
    if(filterReason == "None" && overExtended)
       filterReason = "Over-Extended";
    else if(filterReason == "None" && !freshCrossOK)
       filterReason = "Stale Cross";
+   else if(filterReason == "None" && ((buyAligned && !buyFreshCrossOK) || (sellAligned && !sellFreshCrossOK)))
+      filterReason = "Cross Direction";
 
    // Common filter combination
-   bool allFiltersOK = volumeOK && timeFilterOK && sessionFilterOK && cooldownOK && spreadOK && atrEnvelopeOK && !overExtended && freshCrossOK;
+   bool allFiltersOK = volumeOK && volumeMomentumOK && timeFilterOK && sessionFilterOK &&
+                       cooldownOK && spreadOK && atrEnvelopeOK && !overExtended && freshCrossOK && !signalExpired;
 
    // [BUG-01 FIX] Added sessionFilterOK + atrEnvelopeOK to strong signals
    // [ENH-05] Added Consecutive_Bars_Req check
@@ -2188,17 +2410,19 @@ int OnCalculate(const int rates_total,
    {
       // Strong BUY signal
       if(buyAligned &&
+         buyFreshCrossOK &&
          (!UsePriceAction || bullishPriceAction) &&
          g_signalMgr.GetBuyConsecutiveCount() >= Consecutive_Bars_Req)
       {
          // [ENH-02] MTF check
          bool mtfDowngraded = false;
-         bool mtfOK = CheckMTFAlignment(SIGNAL_BUY, mtfDowngraded);
+         bool mtfOK = CheckMTFAlignment(SIGNAL_BUY, mtfDowngraded, atr_buffer[shift]);
 
          if(mtfOK)
          {
-            double sl = close[shift] - atr_buffer[shift] * ATR_Stop_Multiplier;
-            double tp = close[shift] + atr_buffer[shift] * ATR_Take_Multiplier;
+            double atrScale = GetAdaptiveATRScale(atr_buffer, shift);
+            double sl = close[shift] - atr_buffer[shift] * ATR_Stop_Multiplier * atrScale;
+            double tp = close[shift] + atr_buffer[shift] * ATR_Take_Multiplier * atrScale;
             ApplySpreadAdaptiveSLTP(SIGNAL_BUY, sl, tp);   // [SCALP v3.20]
             EnsureProtectiveLevels(SIGNAL_BUY, close[shift], sl, tp);
 
@@ -2217,8 +2441,11 @@ int OnCalculate(const int rates_total,
             if(IsRiskRewardAcceptable(close[shift], sl, tp) && memoryPass && spreadCostOK && pullbackOK)
             {
                Buy_Signal_Buffer[shift] = low[shift] - atr_buffer[shift] * Arrow_Offset_ATR_Mult;
+               double signalConfidence = (agentConf > 0.0 && InpUseAgentMemory) ? agentConf : sessionQuality;
+               if(mtfDowngraded)
+                  signalConfidence *= 0.85;
                g_signalMgr.SetSignal(SIGNAL_BUY, close[shift], signalBarTime, shift, sl, tp,
-                                     (mtfDowngraded) ? MathMax(agentConf, 0) * 0.85 : agentConf);
+                                     signalConfidence, rsi[shift], adx_main[shift]);
                signalFound = true;
 
                Print("[GOLD] AGENT CONFIRMED STRONG BUY: Conf=", agentConf, " Price=", close[shift],
@@ -2230,16 +2457,18 @@ int OnCalculate(const int rates_total,
       }
       // Strong SELL signal
       else if(sellAligned &&
+              sellFreshCrossOK &&
               (!UsePriceAction || bearishPriceAction) &&
               g_signalMgr.GetSellConsecutiveCount() >= Consecutive_Bars_Req)
       {
          bool mtfDowngraded = false;
-         bool mtfOK = CheckMTFAlignment(SIGNAL_SELL, mtfDowngraded);
+         bool mtfOK = CheckMTFAlignment(SIGNAL_SELL, mtfDowngraded, atr_buffer[shift]);
 
          if(mtfOK)
          {
-            double sl = close[shift] + atr_buffer[shift] * ATR_Stop_Multiplier;
-            double tp = close[shift] - atr_buffer[shift] * ATR_Take_Multiplier;
+            double atrScale = GetAdaptiveATRScale(atr_buffer, shift);
+            double sl = close[shift] + atr_buffer[shift] * ATR_Stop_Multiplier * atrScale;
+            double tp = close[shift] - atr_buffer[shift] * ATR_Take_Multiplier * atrScale;
             ApplySpreadAdaptiveSLTP(SIGNAL_SELL, sl, tp);   // [SCALP v3.20]
             EnsureProtectiveLevels(SIGNAL_SELL, close[shift], sl, tp);
 
@@ -2256,8 +2485,11 @@ int OnCalculate(const int rates_total,
             if(IsRiskRewardAcceptable(close[shift], sl, tp) && memoryPass && spreadCostOK && pullbackOK)
             {
                Sell_Signal_Buffer[shift] = high[shift] + atr_buffer[shift] * Arrow_Offset_ATR_Mult;
+               double signalConfidence = (agentConf > 0.0 && InpUseAgentMemory) ? agentConf : sessionQuality;
+               if(mtfDowngraded)
+                  signalConfidence *= 0.85;
                g_signalMgr.SetSignal(SIGNAL_SELL, close[shift], signalBarTime, shift, sl, tp,
-                                     (mtfDowngraded) ? MathMax(agentConf, 0) * 0.85 : agentConf);
+                                     signalConfidence, rsi[shift], adx_main[shift]);
                signalFound = true;
 
                Print("[GOLD] AGENT CONFIRMED STRONG SELL: Conf=", agentConf, " Price=", close[shift],
@@ -2274,28 +2506,37 @@ int OnCalculate(const int rates_total,
    {
       // Weak BUY signal
       if(buyAligned &&
+         buyFreshCrossOK &&
          adx_main[shift] > ADX_WEAK_THRESHOLD &&
          (!UsePriceAction || bullishPriceAction) &&
          g_signalMgr.GetBuyConsecutiveCount() >= Consecutive_Bars_Req)
       {
          bool mtfDowngraded = false;
-         bool mtfOK = CheckMTFAlignment(SIGNAL_BUY, mtfDowngraded);
+         bool mtfOK = CheckMTFAlignment(SIGNAL_BUY, mtfDowngraded, atr_buffer[shift]);
 
          if(mtfOK && !mtfDowngraded) // Block counter-trend weak signals
          {
-            double sl = close[shift] - atr_buffer[shift] * ATR_Stop_Multiplier;
-            double tp = close[shift] + atr_buffer[shift] * ATR_Take_Multiplier;
+            double atrScale = GetAdaptiveATRScale(atr_buffer, shift);
+            double sl = close[shift] - atr_buffer[shift] * ATR_Stop_Multiplier * atrScale;
+            double tp = close[shift] + atr_buffer[shift] * ATR_Take_Multiplier * atrScale;
             ApplySpreadAdaptiveSLTP(SIGNAL_BUY, sl, tp);   // [SCALP v3.20]
             EnsureProtectiveLevels(SIGNAL_BUY, close[shift], sl, tp);
+
+            double agentConf = 0.0;
+            bool memoryPass = true;
+            if(ShouldPollPythonHub(time[0]))
+               memoryPass = g_agent.CheckMemorySimilarity(rsi[shift], adx_main[shift], SIGNAL_BUY, agentConf);
 
             spreadPctTP = CalculateSpreadPctOfTP(tp, close[shift]);
             bool spreadCostOK = !UseSpreadCostFilter || spreadPctTP <= Max_Spread_Pct_TP;
             bool pullbackOK = CheckPullbackEntry(SIGNAL_BUY, EMA_Short_Buffer, low, high, atr_buffer, shift);
 
-            if(IsRiskRewardAcceptable(close[shift], sl, tp) && spreadCostOK && pullbackOK)
+            if(IsRiskRewardAcceptable(close[shift], sl, tp) && memoryPass && spreadCostOK && pullbackOK)
             {
                Buy_Signal_Buffer[shift] = low[shift] - atr_buffer[shift] * Arrow_Offset_ATR_Mult;
-               g_signalMgr.SetSignal(SIGNAL_BUY, close[shift], signalBarTime, shift, sl, tp);
+               double signalConfidence = (agentConf > 0.0 && InpUseAgentMemory) ? agentConf : sessionQuality;
+               g_signalMgr.SetSignal(SIGNAL_BUY, close[shift], signalBarTime, shift, sl, tp,
+                                     signalConfidence, rsi[shift], adx_main[shift]);
                signalFound = true;
 
                Print("[GOLD] BUY SIGNAL SET: Price=", close[shift],
@@ -2306,28 +2547,37 @@ int OnCalculate(const int rates_total,
       }
       // Weak SELL signal
       else if(sellAligned &&
+              sellFreshCrossOK &&
               adx_main[shift] > ADX_WEAK_THRESHOLD &&
               (!UsePriceAction || bearishPriceAction) &&
               g_signalMgr.GetSellConsecutiveCount() >= Consecutive_Bars_Req)
       {
          bool mtfDowngraded = false;
-         bool mtfOK = CheckMTFAlignment(SIGNAL_SELL, mtfDowngraded);
+         bool mtfOK = CheckMTFAlignment(SIGNAL_SELL, mtfDowngraded, atr_buffer[shift]);
 
          if(mtfOK && !mtfDowngraded)
          {
-            double sl = close[shift] + atr_buffer[shift] * ATR_Stop_Multiplier;
-            double tp = close[shift] - atr_buffer[shift] * ATR_Take_Multiplier;
+            double atrScale = GetAdaptiveATRScale(atr_buffer, shift);
+            double sl = close[shift] + atr_buffer[shift] * ATR_Stop_Multiplier * atrScale;
+            double tp = close[shift] - atr_buffer[shift] * ATR_Take_Multiplier * atrScale;
             ApplySpreadAdaptiveSLTP(SIGNAL_SELL, sl, tp);   // [SCALP v3.20]
             EnsureProtectiveLevels(SIGNAL_SELL, close[shift], sl, tp);
+
+            double agentConf = 0.0;
+            bool memoryPass = true;
+            if(ShouldPollPythonHub(time[0]))
+               memoryPass = g_agent.CheckMemorySimilarity(rsi[shift], adx_main[shift], SIGNAL_SELL, agentConf);
 
             spreadPctTP = CalculateSpreadPctOfTP(tp, close[shift]);
             bool spreadCostOK = !UseSpreadCostFilter || spreadPctTP <= Max_Spread_Pct_TP;
             bool pullbackOK = CheckPullbackEntry(SIGNAL_SELL, EMA_Short_Buffer, low, high, atr_buffer, shift);
 
-            if(IsRiskRewardAcceptable(close[shift], sl, tp) && spreadCostOK && pullbackOK)
+            if(IsRiskRewardAcceptable(close[shift], sl, tp) && memoryPass && spreadCostOK && pullbackOK)
             {
                Sell_Signal_Buffer[shift] = high[shift] + atr_buffer[shift] * Arrow_Offset_ATR_Mult;
-               g_signalMgr.SetSignal(SIGNAL_SELL, close[shift], signalBarTime, shift, sl, tp);
+               double signalConfidence = (agentConf > 0.0 && InpUseAgentMemory) ? agentConf : sessionQuality;
+               g_signalMgr.SetSignal(SIGNAL_SELL, close[shift], signalBarTime, shift, sl, tp,
+                                     signalConfidence, rsi[shift], adx_main[shift]);
                signalFound = true;
 
                Print("[GOLD] SELL SIGNAL SET: Price=", close[shift],
@@ -2343,7 +2593,8 @@ int OnCalculate(const int rates_total,
    {
       g_panel.Update(close, rsi, adx_main, adx_plus_di, adx_minus_di, macd_main, macd_signal,
                     volume_ma, tick_volume_buffer, EMA_Short_Buffer, EMA_Long_Buffer,
-                    g_signalMgr, atr_buffer, shift, filterReason, regime, spreadPctTP);
+                    g_signalMgr, atr_buffer, shift, filterReason, regime, spreadPctTP,
+                    sessionQuality, g_RiskMultiplier);
    }
 
    ResetLastError();
